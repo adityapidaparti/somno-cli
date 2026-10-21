@@ -1,69 +1,99 @@
 ---
 name: somno
-description: The user's Oura and Eight Sleep data through the read-only `somno` CLI. Covers sleep (last night, a week, a range; both sources side by side) and every other Oura data type with its own command, such as readiness, activity and steps, stress and resilience, workouts, heart rate, SpO2, VO2 max, cardiovascular age, tags, sessions, and a one-day dashboard. Use for "how did I sleep", HRV, resting heart rate, sleep stages, readiness, stress, workouts, or comparing Oura with Eight Sleep.
+description: Read the user's Oura and Eight Sleep data with the read-only `somno` CLI. Use for "how did I sleep", sleep stages, HRV, resting heart rate, heart rate, readiness, activity, stress, resilience, workouts, SpO2, VO2 max, cardiovascular age, tags, sessions, or comparing Oura with Eight Sleep.
 ---
 
-# Oura and Eight Sleep data (somno)
+# Oura and Eight Sleep data
 
-Read-only CLI, on PATH. Run one `somno` command per call. Use `--json` when you'll compute or reformat; the plain table is for showing as-is.
+`somno` is a read-only CLI on PATH. Run one `somno` command per call. Use `--json` when you will compute or reformat, and show the plain tables as they are.
 
-```
-somno night --json                  # the night ending today
-somno night yesterday --json        # also -N or YYYY-MM-DD
-somno week --json                   # 7 nights ending today
-somno range 2026-10-01 2026-10-14 --json
-somno night --only oura             # or --only eight
-somno status                        # setup and token expiry, no network
-somno raw oura sleep --start 2026-10-18 --end 2026-10-20    # original JSON, any Oura collection below
-somno raw eight trends --start 2026-10-18 --end 2026-10-20  # original Eight Sleep JSON
-somno oura check                    # which Oura collections this login can read
-somno log                           # recent requests, statuses, error codes and login steps (no secrets)
-```
+## First check
 
-Every Oura data type has its own command. No dates gives the last 7 days as a table, one day gives every field for that day, and `START END` gives a range. `--json` returns `{"timezone", "start", "end", "collections": {<collection>: [Oura's original documents]}, "errors"}`.
+Run `somno status`. It reads only local files and shows which sources are set up and when their tokens expire. For a source the user wants but hasn't set up, give them these steps to run in their own terminal:
+
+- Oura: create an app at https://developer.ouraring.com. Its redirect URI must be exactly `http://localhost:8765/callback`, and every scope must be ticked. Then run `somno oura configure`, which asks for the app's client ID and secret and checks them with Oura, and `somno oura login`, which opens Oura's consent page or prints its link.
+- Eight Sleep: `somno eight login <their email> --remember`. `--remember` saves their password unencrypted so somno can log in again by itself. They can leave it off.
+
+Afterwards, check only the sources they set up. `somno oura check` shows which Oura data types the login reaches, and `somno night --only eight` reads last night from Eight Sleep.
+
+## Nights from both sources
 
 ```
-somno day [DAY] [--json]       # everything for one day: readiness, sleep, activity, stress, resilience, SpO2, cardio age, VO2 max, bedtime, workouts, sessions, tags
-somno readiness [DAY|START END]    # score, temperature deviation, contributors
-somno sleep [...]              # every sleep period incl. naps: stages, HR/HRV, efficiency, embedded readiness
-somno stages [DAY] [--json]    # sleep stages through each period: totals, onset, first deep/REM, awakenings, movement, every 30-second segment
-somno sleep-score [...]        # daily sleep score + contributors
-somno activity [...]           # steps, active/total kcal, activity minutes, score + contributors
-somno stress [...]             # high-stress / high-recovery time, day summary
-somno resilience [...]         # level + contributors
-somno spo2 [...]               # overnight SpO2 average, breathing disturbance index
-somno cardio-age [...]         # vascular age, pulse wave velocity
-somno vo2max [...]
-somno workouts [...]           # activity, time, duration, kcal, distance, intensity, source
-somno sessions [...]           # meditation/breathing/etc.: type, mood, HR and HRV averages
-somno tags [...]               # tags and notes from the Oura app
-somno bedtime [...]            # Oura's recommended bedtime window
-somno rest-mode [...]
-somno hr [DAY|START END]       # heart rate min/avg/max per day, or per hour for one day (max 31 days)
-somno me                       # age, sex, height, weight, email
+somno night --json                       # the night ending today
+somno night yesterday --json             # a day is today, yesterday, -N or YYYY-MM-DD
+somno week --json                        # seven nights ending today
+somno range 2026-10-01 2026-10-14 --json # up to 400 nights
+somno night --only oura                  # or --only eight
 ```
 
-Oura's ring battery and hardware config are only under `somno raw oura ring_battery_level|ring_configuration`. `somno raw oura <collection>` returns any collection's documents unfiltered.
-
-JSON shape: `days[]` has `day` plus `oura` and `eight_sleep`. Each has `status`, which is one of:
+The JSON is `{"timezone", "days", "notes"}`. Each entry in `days` has `day` and one key per source, `oura` and `eight_sleep`. With `--only`, the other key is absent. Each source has a `status`:
 - `record`, with a `night` object
 - `no_record`
 - `unavailable`, with a `reason`
 
 `night` fields:
-- Durations in seconds: `asleep_s`, `deep_s`, `rem_s`, `light_s`, `awake_s`, `time_in_bed_s`, `latency_s`.
-- Metrics: `hr_avg_bpm`, `hr_lowest_bpm`, `hrv_avg_ms`, `breath_avg_per_min`, `sleep_score`, `readiness_score`, `temp_deviation_c`, `bed_temp_c`, `room_temp_c`, `out_of_bed_s` (Eight Sleep).
+- Durations in seconds: `asleep_s`, `deep_s`, `rem_s`, `light_s`, `awake_s`, `time_in_bed_s`, `latency_s`, and `out_of_bed_s`, which only Eight Sleep reports.
+- Metrics: `hr_avg_bpm`, `hr_lowest_bpm`, `hrv_avg_ms`, `breath_avg_per_min`, `sleep_score`, `readiness_score`, `temp_deviation_c`, `bed_temp_c`, `room_temp_c`.
 - Times: `bedtime_start` and `bedtime_end`, in RFC 3339.
-- `null` means the source didn't report it.
+- `other_periods`: how many other confirmed Oura periods that day has, such as naps. It is `null` for Eight Sleep.
+- `null` means unknown. Before treating the results as complete, check `notes` for requests that failed.
 
-Rules:
-- Never run `somno oura configure|login|logout` or `somno eight login|logout`; they need the user's browser or password. `somno oura check` is fine to run. When a source is `unavailable`, pass on its `reason`, which names the command the user should run.
-- When a command fails, read `somno log` before guessing. It shows each request's status and Oura's or Eight Sleep's error code.
-- A collection that fails with HTTP 401/403 usually means its scope wasn't granted. Say so, and suggest the user log in again with every scope ticked.
+## Every Oura data type
+
+```
+somno day [DAY] [--json]          # one day on one screen; defaults to today
+somno readiness [DAY | START END] # score, temperature deviation, contributors
+somno sleep                       # every sleep period, naps included
+somno stages [DAY] [--json]       # stages through each period: totals, onset, first deep and REM, wake-ups, movement
+somno stages [DAY] --segments     # also every stage change
+somno sleep-score
+somno activity                    # steps, calories, activity minutes, score
+somno stress
+somno resilience
+somno spo2
+somno cardio-age
+somno vo2max
+somno workouts
+somno sessions                    # meditation, breathing and other sessions
+somno tags
+somno bedtime                     # Oura's recommended bedtime window
+somno rest-mode
+somno hr [DAY | START END]        # heart rate per day, or per hour for one day; up to 31 days
+somno me [--json]                 # age, sex, height, weight, email
+```
+
+Commands that take dates show the last seven days as a table when given none, one day in detail, or an inclusive range of up to 400 days, or 31 for `hr`. `day` and `stages` default to today, and `me` takes no date. With `--json` they print `{"timezone", "start", "end", "collections", "errors"}`, where `collections` maps each collection to Oura's original documents and `errors` lists collections that failed. `somno me --json` prints Oura's profile as is, and `somno stages --json` prints `{"day", "periods"}`.
+
+The detail view leaves out ids and summarizes series. Use `--json` when you need every value.
+
+## Original JSON
+
+```
+somno raw oura sleep --start 2026-10-18 --end 2026-10-20   # any of Oura's 19 collections
+somno raw oura ring_battery_level --start yesterday --end today
+somno raw eight trends --start 2026-10-18 --end 2026-10-20
+somno raw eight me
+```
+
+Raw Oura queries pass the dates to Oura as given. For `heartrate` and `ring_battery_level`, `--end` is midnight at the start of that date, so use the next date to include a whole last day.
+
+## When something fails
+
+- Run `somno log` before guessing. It shows each request's status and the provider's error code and message.
+- When a source is `unavailable`, pass on its `reason`. It names the command the user should run.
+- HTTP 401 from Oura means it didn't accept the login, so the user should run `somno oura login` again. HTTP 403 usually means a missing scope or a lapsed membership. The user should log in again with every scope ticked, and then you can run `somno oura check`.
+- `somno day` marks a section "unavailable" when its data couldn't be fetched. That is different from no data.
+
+## Rules
+
+- Never run `somno oura configure`, `somno oura login`, `somno oura logout`, `somno eight login` or `somno eight logout`. They need the user's browser, secret or password. `somno oura check` and `somno status` are safe.
 - Missing is unknown, not zero. Don't fill gaps, and don't merge the two sources into one number. Report each value with its source.
-- Each source labels a night by its own `day`. Check `bedtime_start`/`bedtime_end` before comparing a night across sources.
-- Oura's night is its longest `long_sleep`. `other_periods` counts confirmed naps left out (always `null` for Eight Sleep). Periods typed `deleted` (you deleted them) or `rest` (false detections you rejected) never count as sleep, but `somno sleep` still lists them.
-- `somno day` marks a section "unavailable" when its data couldn't be fetched. That is not the same as none.
-- Eight Sleep uses an unofficial API that can change. Its "awake" is awake in bed; "out of bed" (`out_of_bed_s`) is separate. Eight Sleep usually counts more time in bed and more sleep than Oura (it detects the mattress, not the ring). Report both with their source, and don't call either one correct. Nights with `processing: true` aren't final.
-- "today" and displayed times use the system timezone. Pass `--tz America/New_York` if this machine is in another zone.
+- Each source labels a night by its own `day`. Compare `bedtime_start` and `bedtime_end` before comparing a night across sources.
+- Oura's night is the day's longest `long_sleep`, or its longest other confirmed period when there is none. Periods typed `deleted`, which the user deleted, and `rest`, which are false detections the user rejected, never count as sleep. `somno sleep` still lists them.
+- Eight Sleep uses an unofficial API that can change. Its awake time is awake in bed, and out of bed is separate. It senses the mattress while Oura reads the finger, so the two often disagree. Report both with their source, and don't call either one correct. A night with `processing: true` isn't final.
+- "today" uses `--tz`, then `SOMNO_TZ`, then the system timezone. Pass `--tz ZONE` when the machine is in a different zone from the user. Oura's times keep the offset Oura recorded.
 - Describe sleep without moralizing.
+
+## Updating this skill
+
+To update this file after upgrading somno, run the same `somno skill install` command, with the same `--dir` if one was used. It leaves a linked skill folder alone and replaces a file that differs.

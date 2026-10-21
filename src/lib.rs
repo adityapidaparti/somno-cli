@@ -3,6 +3,7 @@ pub mod http;
 pub mod log;
 pub mod night;
 pub mod oura;
+pub mod skill;
 pub mod stages;
 pub mod store;
 pub mod types;

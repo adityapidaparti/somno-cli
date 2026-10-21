@@ -121,6 +121,21 @@ enum Command {
         #[arg(short = 'n', long, default_value_t = 40)]
         lines: usize,
     },
+    /// Print the agent skill for this version, or install it with `skill install`
+    Skill {
+        #[command(subcommand)]
+        action: Option<SkillCmd>,
+    },
+}
+
+#[derive(Subcommand)]
+enum SkillCmd {
+    /// Write the skill to DIR/NAME/SKILL.md [default DIR: ~/.claude/skills, read by Claude Code and Grok CLI]
+    Install {
+        /// Skills directory of another agent
+        #[arg(long)]
+        dir: Option<std::path::PathBuf>,
+    },
 }
 
 /// No dates: the last 7 days as a table. One day: every field for that day.
@@ -266,6 +281,7 @@ fn run() -> Result<()> {
         Command::Oura(cmd) => oura_cmd(cmd, tz, today),
         Command::Eight(cmd) => eight_cmd(cmd),
         Command::Raw(cmd) => raw(cmd, tz, today),
+        Command::Skill { action } => skill_cmd(action),
         Command::Log { lines } => {
             match log::path() {
                 None => println!("logging is off (SOMNO_LOG=off)"),
@@ -279,6 +295,21 @@ fn run() -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn skill_cmd(action: Option<SkillCmd>) -> Result<()> {
+    use somno::skill;
+    match action {
+        None => print!("{}", skill::SKILL),
+        Some(SkillCmd::Install { dir }) => {
+            let dir = match dir {
+                Some(d) => d,
+                None => skill::default_dir()?,
+            };
+            println!("{}", skill::install(&dir, skill::NAME, skill::SKILL)?);
+        }
+    }
+    Ok(())
 }
 
 fn resolve_tz(flag: Option<&str>) -> Result<Tz> {
