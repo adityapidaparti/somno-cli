@@ -83,7 +83,8 @@ pub fn session_from_response(v: &Value, email: &str, now: i64) -> Result<Session
         user_id: user_id.to_string(),
         access_token: access_token.to_string(),
         // Saturating, so an absurd expiry can't overflow; capped at ten years.
-        expires_at: now.saturating_add(expires_in.min(10.0 * 365.0 * 86400.0) as i64),
+        // Rounded up, so any positive expiry is later than now.
+        expires_at: now.saturating_add(expires_in.min(10.0 * 365.0 * 86400.0).ceil() as i64),
     })
 }
 
@@ -223,8 +224,19 @@ fn series(session: Option<&Value>, key: &str) -> Vec<f64> {
         .unwrap_or_default()
 }
 
+/// The mean, or unknown when there are no values or the sum overflows.
 fn mean(xs: &[f64]) -> Option<f64> {
-    (!xs.is_empty()).then(|| xs.iter().sum::<f64>() / xs.len() as f64)
+    (!xs.is_empty()).then(|| xs.iter().sum::<f64>() / xs.len() as f64).filter(|m| m.is_finite())
+}
+
+/// Whether the night is still being computed: either flag set says so.
+/// Unknown when neither flag is a boolean.
+fn processing(d: &Value) -> Option<bool> {
+    let flag = |k: &str| d.get(k).and_then(Value::as_bool);
+    match (flag("processing"), flag("incomplete")) {
+        (None, None) => None,
+        (a, b) => Some(a == Some(true) || b == Some(true)),
+    }
 }
 
 /// Per-day summary from a trends response, checked against real responses
@@ -272,7 +284,7 @@ pub fn summarize(trends: &Value, days: &[NaiveDate]) -> Result<BTreeMap<NaiveDat
             bed_temp_c: mean(&series(session, "tempBedC")),
             room_temp_c: mean(&series(session, "tempRoomC")),
             toss_turns: num(d, &["tnt"]),
-            processing: d.get("processing").or_else(|| d.get("incomplete")).and_then(Value::as_bool),
+            processing: processing(d),
             ..Night::default()
         };
         let raw = d.to_string();

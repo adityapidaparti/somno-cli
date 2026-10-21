@@ -43,9 +43,14 @@ impl FromStr for DaySpec {
                 };
             }
         }
-        NaiveDate::parse_from_str(&s, "%Y-%m-%d")
+        // Exactly YYYY-MM-DD, so a signed or six-digit year (which chrono
+        // accepts) can't reach the edge of the calendar and overflow later.
+        let shaped = s.len() == 10 && s.bytes().enumerate().all(|(i, b)| if i == 4 || i == 7 { b == b'-' } else { b.is_ascii_digit() });
+        shaped
+            .then(|| NaiveDate::parse_from_str(&s, "%Y-%m-%d").ok())
+            .flatten()
             .map(DaySpec::Date)
-            .map_err(|_| format!("unknown day '{s}' (expected today|yesterday|-N|YYYY-MM-DD)"))
+            .ok_or_else(|| format!("unknown day '{s}' (expected today|yesterday|-N|YYYY-MM-DD)"))
     }
 }
 

@@ -210,20 +210,31 @@ pub fn collection_docs(tc: &TestCase, collection: &'static str) -> Value {
     }
 }
 
-/// A heart-rate sample at any instant (often around a US DST switch),
-/// written in any UTC offset, sometimes with a null bpm.
+/// A heart-rate sample at any instant, often within two hours of a DST switch
+/// (US Eastern, or Lord Howe's 30-minute ones), written in any UTC offset,
+/// sometimes with a null bpm.
 #[hegel::composite]
 pub fn hr_samples(tc: &TestCase) -> Value {
-    let base = tc.draw(hegel::one_of!(
-        gs::sampled_from(&[date(2026, 3, 7), date(2026, 10, 31), date(2026, 10, 12)][..]),
-        any_day(),
-    ));
-    let secs = tc.draw(gs::integers::<i64>().min_value(0).max_value(3 * 24 * 3600));
+    let utc = |s: &str| DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&chrono::Utc);
+    let switches = [
+        utc("2026-03-08T07:00:00Z"),
+        utc("2026-11-01T06:00:00Z"),
+        utc("2026-04-04T15:00:00Z"),
+        utc("2026-10-03T15:30:00Z"),
+    ];
+    let instant = if tc.draw(gs::booleans()) {
+        let switch = tc.draw(gs::sampled_from(&switches[..]));
+        tc.event("sample near a DST switch");
+        switch + Duration::seconds(tc.draw(gs::integers::<i64>().min_value(-7200).max_value(7200)))
+    } else {
+        let base = tc.draw(hegel::one_of!(gs::just(date(2026, 10, 12)), any_day()));
+        chrono::Utc.from_utc_datetime(&base.and_hms_opt(0, 0, 0).unwrap()) + Duration::seconds(tc.draw(gs::integers::<i64>().min_value(0).max_value(3 * 24 * 3600)))
+    };
     let millis = tc.draw(hegel::one_of!(gs::just(0i64), gs::integers::<i64>().min_value(0).max_value(999)));
     let offset = tc.draw(offsets());
     let bpm = tc.draw(gs::optional(gs::integers::<u32>().min_value(25).max_value(230)));
     let source = tc.draw(gs::sampled_from(&["awake", "rest", "sleep", "session", "workout", "live"][..]));
-    let instant = chrono::Utc.from_utc_datetime(&base.and_hms_opt(0, 0, 0).unwrap()) + Duration::seconds(secs) + Duration::milliseconds(millis);
+    let instant = instant + Duration::milliseconds(millis);
     json!({"bpm": bpm, "source": source, "timestamp": instant.with_timezone(&offset).to_rfc3339()})
 }
 

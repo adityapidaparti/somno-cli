@@ -130,8 +130,8 @@ pub fn stage_stats(h: &Hypnogram) -> Vec<(Stage, StageStats)> {
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Events {
-    /// Oura's sleep onset (`bedtime_start + latency`); the first sleep epoch
-    /// when Oura gave no latency.
+    /// Oura's sleep onset (`bedtime_start + latency`) when it lies in the
+    /// period and no later than the last sleep; otherwise the first sleep epoch.
     pub fell_asleep: Option<DateTime<FixedOffset>>,
     /// First epoch scored as sleep. Can be earlier than Oura's onset, which
     /// does not count brief dozing.
@@ -139,7 +139,8 @@ pub struct Events {
     pub woke_for_good: Option<DateTime<FixedOffset>>,
     pub first_deep: Option<DateTime<FixedOffset>>,
     pub first_rem: Option<DateTime<FixedOffset>>,
-    /// Awake time from `fell_asleep` to the last epoch scored as sleep.
+    /// Awake time from `fell_asleep` to the end of the last epoch scored as
+    /// sleep, in seconds (not rounded to epochs).
     pub awake_between_seconds: i64,
     /// Awake stretches of at least five minutes in that window (a stretch
     /// cut by the window counts only its part inside).
@@ -149,35 +150,38 @@ pub struct Events {
 pub fn events(h: &Hypnogram, latency_secs: Option<f64>) -> Events {
     let window = h.sleep_window();
     let first_sleep_epoch = window.map(|(a, _)| h.at(a));
-    // A latency outside the period (negative, non-finite, or longer than the
-    // period itself) is not a usable onset; fall back to the first sleep epoch.
-    let span = h.epochs.len() as f64 * h.epoch_secs as f64;
-    let latency_secs = latency_secs.filter(|l| l.is_finite() && *l >= 0.0 && *l <= span);
-    let oura_onset = latency_secs.map(|l| h.start + Duration::seconds(l as i64));
+    let epoch = h.epoch_secs.max(1);
+    // Seconds from the start of the period to the end of the last sleep epoch.
+    let last_sleep_end = window.map(|(_, b)| (b as i64 + 1) * epoch);
+    // A latency outside the period (negative, non-finite, longer than the
+    // period itself) or after the last sleep is not a usable onset; fall back
+    // to the first sleep epoch.
+    let span = h.epochs.len() as f64 * epoch as f64;
+    let latency_secs = latency_secs
+        .filter(|l| l.is_finite() && *l >= 0.0 && *l <= span)
+        .map(|l| l as i64)
+        .filter(|l| last_sleep_end.is_none_or(|end| *l <= end));
+    let oura_onset = latency_secs.map(|l| h.start + Duration::seconds(l));
     let first = |stage: Stage| h.epochs.iter().position(|s| *s == Some(stage)).map(|i| h.at(i));
-    // Wake is counted from the same onset "fell asleep" shows (Oura's, when
-    // given) to the last epoch scored as sleep. Awake time before that onset
-    // is falling asleep, not waking up.
-    let onset_epoch = |a: usize| match latency_secs {
-        Some(l) => ((l as i64) / h.epoch_secs.max(1)) as usize,
-        None => a,
-    };
-    let (awake_between_seconds, awakenings_5min) = match window {
-        Some((a, b)) => {
-            let from = onset_epoch(a);
+    // Wake is counted in seconds from the same onset "fell asleep" shows
+    // (Oura's, when given) to the end of the last epoch scored as sleep, so
+    // 5-minute and 30-second codes agree. Awake time before that onset is
+    // falling asleep, not waking up.
+    let (awake_between_seconds, awakenings_5min) = match (window, last_sleep_end) {
+        (Some((a, _)), Some(to)) => {
+            let from = latency_secs.unwrap_or(a as i64 * epoch);
             let mut total = 0i64;
             let mut long = 0usize;
             for r in h.runs().into_iter().filter(|r| r.stage == Some(Stage::Awake)) {
-                let (lo, hi) = (r.start.max(from), (r.start + r.len).min(b + 1));
+                let (lo, hi) = ((r.start as i64 * epoch).max(from), ((r.start + r.len) as i64 * epoch).min(to));
                 if hi > lo {
-                    let secs = (hi - lo) as i64 * h.epoch_secs;
-                    total += secs;
-                    long += usize::from(secs >= 300);
+                    total += hi - lo;
+                    long += usize::from(hi - lo >= 300);
                 }
             }
             (total, long)
         }
-        None => (0, 0),
+        _ => (0, 0),
     };
     Events {
         fell_asleep: oura_onset.or(first_sleep_epoch),
@@ -207,12 +211,13 @@ fn hms(t: &DateTime<FixedOffset>) -> String {
     t.format("%H:%M:%S").to_string()
 }
 
-/// Durations at epoch precision: `30s`, `4m 30s`, `1h 05m`.
+/// Durations at epoch precision: `30s`, `4m 30s`, `1h 05m`, `1h 00m 30s`.
 fn exact(secs: i64) -> String {
     match secs {
         s if s < 60 => format!("{s}s"),
-        s if s < 3600 && s % 60 != 0 => format!("{}m {:02}s", s / 60, s % 60),
-        s => d(s),
+        s if s % 60 == 0 => d(s),
+        s if s < 3600 => format!("{}m {:02}s", s / 60, s % 60),
+        s => format!("{}h {:02}m {:02}s", s / 3600, s / 60 % 60, s % 60),
     }
 }
 

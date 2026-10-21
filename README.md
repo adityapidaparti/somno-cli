@@ -238,7 +238,7 @@ Every run appends to `somno.log` in the config directory (0600; rotated to
 - the final error
 
 Never logged: secrets, passwords, tokens, authorization codes, OAuth state,
-client IDs (`…` in URLs) or response bodies. Set `SOMNO_LOG=off` to disable
+client IDs (`redacted` in URLs) or response bodies. Set `SOMNO_LOG=off` to disable
 it, or `SOMNO_LOG=<path>` to write elsewhere.
 
 ## Local state and security
@@ -326,6 +326,29 @@ Bugs found this way, all fixed and kept as tests:
 - Summarizing a year of nights was quadratic (4 s); documents are now
   indexed by day once (found by the scale probe).
 
+Found by an adversarial review that read only the code and this README and
+proposed properties (each property was checked to fail on the old code):
+- With 5-minute stage codes, awake time just before Oura's onset counted as
+  waking up, and Oura's onset could land after "woke for good". Wake time is
+  now counted in seconds from the onset, and an onset after the last sleep
+  falls back to the first sleep epoch.
+- A day whose midnight is skipped by DST (Havana, Santiago, Beirut) failed
+  `hr`; heart-rate hours in Lord Howe (30-minute DST) were labelled with the
+  wrong hour.
+- Duplicate daily score or readiness documents, and listing ties, followed
+  Oura's response order; a period with no bedtime won ties.
+- Eight Sleep's `incomplete` flag was ignored when `processing` was false,
+  huge samples gave an infinite temperature, and Eight nights claimed zero
+  other periods instead of unknown.
+- A night that changed timezone could show a bedtime without its offset;
+  table views never showed offsets.
+- A pasted URL with another host and no scheme was accepted as a login
+  redirect; a valid one in capitals was rejected.
+- A date with a six-digit or signed year panicked; `range` allowed 401 nights.
+- The log kept URL fragments and parameter names in other letter cases; a
+  blank error field hid the server's message; segment lengths of an hour or
+  more dropped their seconds.
+
 Mutation testing (cargo-mutants 27.1, 252 mutants in the core functions)
 measured the earlier proptest suite. It went from catching 204 of 230 mutants
 to every mutant except two that are unreachable (positive day offsets the
@@ -334,7 +357,7 @@ split one contract per test.
 
 ## Verification status
 
-`cargo test` runs 127 tests: 82 Hegel properties (see Testing), plus example
+`cargo test` runs 142 tests: 97 Hegel properties (see Testing), plus example
 tests over synthetic fixtures for each view, the stage decoder, OAuth
 parsing, `configure`'s verdicts, and private-file storage and logging. `configure` has run live against Oura:
 - With the real secret, the ID + secret check passed (`invalid_grant`).

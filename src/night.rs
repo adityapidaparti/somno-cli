@@ -67,8 +67,9 @@ pub struct Night {
     pub out_of_bed_s: Option<f64>,
     /// Eight Sleep still computing this night.
     pub processing: Option<bool>,
-    /// Further sleep periods on this day (naps, rest) that this summary leaves out.
-    pub other_periods: usize,
+    /// Oura: further confirmed periods on this day (naps) that this summary
+    /// leaves out. Unknown for Eight Sleep, which reports one night.
+    pub other_periods: Option<usize>,
 }
 
 /// What one source has for one day.
@@ -126,28 +127,48 @@ const DASH: &str = "—";
 /// 20:00 at home) and shown when it differs from the display zone. Eight
 /// Sleep sends UTC, which says nothing about where you were, so it is
 /// converted to the display zone.
-fn hm(t: &DateTime<FixedOffset>, tz: Tz, source: Source) -> String {
+fn span(n: &Night, tz: Tz, source: Source) -> Option<String> {
     match source {
-        Source::Oura => t.format("%H:%M").to_string(),
-        Source::EightSleep => t.with_timezone(&tz).format("%H:%M").to_string(),
+        Source::Oura => local_span(n.bedtime_start.as_ref(), n.bedtime_end.as_ref(), tz, " → "),
+        Source::EightSleep => {
+            if n.bedtime_start.is_none() && n.bedtime_end.is_none() {
+                return None;
+            }
+            let clock = |t: &Option<DateTime<FixedOffset>>| t.map(|t| t.with_timezone(&tz).format("%H:%M").to_string()).unwrap_or_else(|| "?".into());
+            Some(format!("{} → {}", clock(&n.bedtime_start), clock(&n.bedtime_end)))
+        }
     }
 }
 
-fn span(n: &Night, tz: Tz, source: Source) -> Option<String> {
-    let clock = |t: &Option<DateTime<FixedOffset>>| t.as_ref().map(|t| hm(t, tz, source)).unwrap_or_else(|| "?".into());
-    if n.bedtime_start.is_none() && n.bedtime_end.is_none() {
-        return None;
+/// The offset of `t` when it differs from `tz`'s at that instant.
+fn away(t: &DateTime<FixedOffset>, tz: Tz) -> Option<String> {
+    (*t.offset() != t.with_timezone(&tz).offset().fix()).then(|| t.format("%:z").to_string())
+}
+
+/// `HH:MM` where it happened, with its offset when that differs from `tz`'s.
+pub fn local_clock(t: &DateTime<FixedOffset>, tz: Tz) -> String {
+    let base = t.format("%H:%M").to_string();
+    match away(t, tz) {
+        Some(o) => format!("{base} ({o})"),
+        None => base,
     }
-    let mut out = format!("{} → {}", clock(&n.bedtime_start), clock(&n.bedtime_end));
-    if source == Source::Oura {
-        if let Some(t) = n.bedtime_end.as_ref().or(n.bedtime_start.as_ref()) {
-            let home = t.with_timezone(&tz).offset().fix();
-            if *t.offset() != home {
-                out += &format!(" ({})", t.format("%:z"));
-            }
+}
+
+/// Two clock times where they happened, joined by `sep`. An offset that
+/// differs from `tz`'s is shown once at the end when both times share it,
+/// and after each time otherwise (a night that changed timezone).
+pub fn local_span(start: Option<&DateTime<FixedOffset>>, end: Option<&DateTime<FixedOffset>>, tz: Tz, sep: &str) -> Option<String> {
+    let bare = |t: Option<&DateTime<FixedOffset>>| t.map(|t| t.format("%H:%M").to_string()).unwrap_or_else(|| "?".into());
+    match (start, end) {
+        (None, None) => None,
+        (Some(a), Some(b)) if a.offset() != b.offset() => {
+            Some(format!("{}{sep}{}", local_clock(a, tz), local_clock(b, tz)))
+        }
+        _ => {
+            let label = end.and_then(|t| away(t, tz)).or_else(|| start.and_then(|t| away(t, tz)));
+            Some(format!("{}{sep}{}{}", bare(start), bare(end), label.map(|o| format!(" ({o})")).unwrap_or_default()))
         }
     }
-    Some(out)
 }
 
 fn dur(x: Option<f64>) -> Option<String> {
@@ -191,8 +212,8 @@ fn rows() -> Vec<(&'static str, Cell)> {
             if let Some(t) = n.period_type.as_deref().filter(|t| *t != "long_sleep") {
                 notes.push(format!("period type {t}"));
             }
-            if n.other_periods > 0 {
-                notes.push(format!("+{} other period(s)", n.other_periods));
+            if let Some(k) = n.other_periods.filter(|k| *k > 0) {
+                notes.push(format!("+{k} other period(s)"));
             }
             (!notes.is_empty()).then(|| notes.join(", "))
         }),

@@ -14,7 +14,7 @@
 //! documented endpoint is the fallback for legacy-portal apps.
 
 use anyhow::{anyhow, bail, Context, Result};
-use chrono::{Duration, NaiveDate, NaiveTime, TimeZone, Utc};
+use chrono::{DateTime, Duration, NaiveDate, NaiveTime, TimeZone, Utc};
 use chrono_tz::Tz;
 use reqwest::blocking::Client;
 use reqwest::Url;
@@ -30,6 +30,7 @@ use crate::night::{day_of, num, text, Night};
 use crate::log;
 use crate::store;
 use crate::types::parse_timestamp;
+use crate::views;
 
 pub const AUTHORIZE_URL: &str = "https://cloud.ouraring.com/oauth/authorize";
 pub const TOKEN_URL: &str = "https://moi.ouraring.com/oauth/v2/ext/oauth-token";
@@ -327,25 +328,31 @@ fn should_open_browser() -> bool {
 }
 
 /// A redirect URL pasted from a browser's address bar, validated like the
-/// loopback callback (same state check). Accepts the full URL, the URL without
-/// its scheme, the path, or just the query string.
+/// loopback callback (same state check). Accepts the full URL (any letter
+/// case in the scheme and host), the URL without its scheme, the path, or
+/// just the query string. Anything naming another host is refused.
 pub fn parse_pasted(input: &str, expected_state: &str) -> Callback {
     let s = input.trim().trim_matches(|c| matches!(c, '"' | '\'' | '<' | '>'));
-    let with_scheme = if s.starts_with("localhost") { format!("http://{s}") } else { s.to_string() };
-    let target = if with_scheme.starts_with("http://") || with_scheme.starts_with("https://") {
+    // A bare query string starts with `?` or with a parameter name; anything
+    // else before the first `?`, `=`, `&` or `#` (a host, a port, a path) is a URL.
+    let head = s.split(['?', '=', '&', '#']).next().unwrap_or("");
+    let bare_query = s.starts_with('?') || (!head.is_empty() && s.contains('=') && head.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'));
+    let target = if bare_query {
+        if !(s.contains("code=") || s.contains("error=")) {
+            return Callback::Invalid("expected the full redirect URL");
+        }
+        format!("/callback?{}", s.trim_start_matches('?'))
+    } else if s.starts_with('/') {
+        s.to_string()
+    } else {
+        let with_scheme = if s.contains("://") { s.to_string() } else { format!("http://{s}") };
         let Ok(url) = Url::parse(&with_scheme) else {
             return Callback::Invalid("unparseable URL");
         };
-        if url.host_str() != Some("localhost") || url.port_or_known_default() != Some(8765) {
+        if !matches!(url.scheme(), "http" | "https") || url.host_str() != Some("localhost") || url.port_or_known_default() != Some(8765) {
             return Callback::Invalid("not the registered redirect address");
         }
         format!("{}?{}", url.path(), url.query().unwrap_or(""))
-    } else if s.starts_with('/') {
-        s.to_string()
-    } else if s.starts_with('?') || s.contains("code=") || s.contains("error=") {
-        format!("/callback?{}", s.trim_start_matches('?'))
-    } else {
-        return Callback::Invalid("expected the full redirect URL");
     };
     parse_callback(&target, expected_state)
 }
@@ -378,12 +385,15 @@ pub fn tokens_from_response(v: &Value, now: i64, previous: Option<&Tokens>) -> R
         access_token: access_token.to_string(),
         refresh_token,
         // Saturating, so an absurd expiry can't overflow; capped at ten years.
-        expires_at: now.saturating_add(expires_in.min(10.0 * 365.0 * 86400.0) as i64),
+        // Rounded up, so any positive expiry is later than now.
+        expires_at: now.saturating_add(expires_in.min(10.0 * 365.0 * 86400.0).ceil() as i64),
         scope: text(v, &["scope"]).map(str::to_string).or_else(|| previous.and_then(|p| p.scope.clone())),
     })
 }
 
 /// Collect `data` from every page, following `next_token` until it is null.
+/// A page without `data`, or an empty or repeated token, is an error rather
+/// than a guess at whether the list ended.
 pub fn paginate(mut fetch: impl FnMut(Option<&str>) -> Result<Value>) -> Result<Vec<Value>> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
@@ -406,6 +416,14 @@ pub fn paginate(mut fetch: impl FnMut(Option<&str>) -> Result<Value>) -> Result<
     bail!("Oura pagination exceeded 10000 pages")
 }
 
+/// The first instant of `day` in `tz`: midnight, or the moment clocks jump
+/// to when a DST change skips midnight (as in Havana or Santiago).
+pub fn day_start(day: NaiveDate, tz: Tz) -> Result<DateTime<Tz>> {
+    (0..=24 * 60)
+        .find_map(|m| tz.from_local_datetime(&(day.and_time(NaiveTime::MIN) + Duration::minutes(m))).earliest())
+        .with_context(|| format!("{day} has no start in {}", tz.name()))
+}
+
 /// Query parameters for a collection. Daily collections get Oura's own
 /// `start_date`/`end_date`; time series get midnight-to-midnight datetimes
 /// in `tz` (with the correct offset across DST changes).
@@ -413,13 +431,7 @@ pub fn window_params(collection: &str, start: Option<NaiveDate>, end: Option<Nai
     if UNDATED.contains(&collection) {
         return Ok(vec![]);
     }
-    let midnight = |d: NaiveDate| -> Result<String> {
-        let local = tz
-            .from_local_datetime(&d.and_time(NaiveTime::MIN))
-            .earliest()
-            .with_context(|| format!("{d} has no midnight in {}", tz.name()))?;
-        Ok(local.to_rfc3339())
-    };
+    let midnight = |d: NaiveDate| -> Result<String> { Ok(day_start(d, tz)?.to_rfc3339()) };
     let mut params = Vec::new();
     let timeseries = TIMESERIES.contains(&collection);
     if let Some(s) = start {
@@ -666,13 +678,16 @@ impl Oura {
     }
 }
 
-/// The longest period. Ties go to the earliest bedtime, then the smallest
-/// id, then the document text, so the pick never depends on the order Oura
-/// returns documents in.
+/// The longest period. Ties go to the earliest known bedtime (a missing one
+/// ranks last), then the smallest id, then the document text, so the pick
+/// never depends on the order Oura returns documents in.
 pub fn longest<'a>(periods: impl Iterator<Item = &'a Value>) -> Option<&'a Value> {
     periods.max_by(|a, b| {
         let total = |d: &Value| num(d, &["total_sleep_duration"]).unwrap_or(-1.0);
-        let start = |d: &Value| text(d, &["bedtime_start"]).and_then(parse_timestamp).map(|t| t.with_timezone(&Utc));
+        let start = |d: &Value| {
+            let t = text(d, &["bedtime_start"]).and_then(parse_timestamp).map(|t| t.with_timezone(&Utc));
+            (t.is_none(), t)
+        };
         let id = |d: &Value| text(d, &["id"]).unwrap_or("").to_string();
         total(a)
             .total_cmp(&total(b))
@@ -714,12 +729,14 @@ pub fn query_window(collection: &str, start: NaiveDate, end: NaiveDate) -> (Naiv
     (start - Duration::days(back), end + Duration::days(1))
 }
 
-/// The first document for each day (Oura sends one daily document per day).
+/// One document for each day. Oura sends one daily document per day; if it
+/// sends more, the first in `views::sort_docs` order wins (the same one
+/// `somno day` shows), so the pick never depends on response order.
 fn first_by_day(docs: &[Value]) -> BTreeMap<NaiveDate, &Value> {
     let mut map: BTreeMap<NaiveDate, &Value> = BTreeMap::new();
     for d in docs {
         if let Some(day) = day_of(d) {
-            map.entry(day).or_insert(d);
+            map.entry(day).and_modify(|kept| if views::order_key(d) < views::order_key(kept) { *kept = d }).or_insert(d);
         }
     }
     map
@@ -766,7 +783,7 @@ pub fn summarize(sleep: &[Value], daily_sleep: &[Value], readiness: &[Value], da
             night.hrv_avg_ms = num(p, &["average_hrv"]);
             night.breath_avg_per_min = num(p, &["average_breath"]);
             night.restless_periods = num(p, &["restless_periods"]);
-            night.other_periods = periods.len() - 1;
+            night.other_periods = Some(periods.len() - 1);
         }
         night.sleep_score = score.as_ref().and_then(|d| num(d, &["score"]));
         night.readiness_score = ready.as_ref().and_then(|d| num(d, &["score"]));

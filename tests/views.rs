@@ -76,7 +76,7 @@ fn activity_table_formats_units_and_unknowns() {
                "high_activity_time": 0, "medium_activity_time": 3000, "low_activity_time": 20400, "sedentary_time": 28800}),
         json!({"day": "2026-10-15", "score": null}),
     ];
-    let out = render_table(&view, &docs);
+    let out = render_table(&view, &docs, ny());
     let lines: Vec<&str> = out.lines().collect();
     assert!(lines[0].starts_with("day         score"));
     assert!(lines[1].contains("10,422") && lines[1].contains("2,940") && lines[1].contains("50m") && lines[1].contains("8h 00m"), "{}", lines[1]);
@@ -124,7 +124,7 @@ fn bedtime_window_from_offsets() {
     let doc = json!({"day": "2026-10-20", "optimal_bedtime": {"day_tz": -14400, "start_offset": -3600, "end_offset": 1800},
                      "recommendation": "follow_optimal_bedtime", "status": "optimal_found"});
     let view = views::view("bedtime").unwrap();
-    let table = render_table(&view, std::slice::from_ref(&doc));
+    let table = render_table(&view, std::slice::from_ref(&doc), ny());
     assert!(table.contains("23:00–00:30"), "{table}");
     assert!(table.contains("follow optimal bedtime"));
     assert!(render_detail(view.first, &doc, ny()).contains("23:00–00:30 (local)"));
@@ -139,7 +139,7 @@ fn tags_read_both_tag_collections() {
         json!({"start_day": "2026-10-20", "start_time": "2026-10-20T22:00:00-04:00", "tag_type_code": "custom", "custom_name": "sauna"}),
         json!({"day": "2026-10-20", "timestamp": "2026-10-20T08:00:00-04:00", "tags": ["alcohol", "late_meal"], "text": "dinner out"}),
     ];
-    let out = render_table(&view, &docs);
+    let out = render_table(&view, &docs, ny());
     assert!(out.contains("21:00") && out.contains("caffeine") && out.contains("late coffee"), "{out}");
     assert!(out.contains("sauna"));
     assert!(out.contains("alcohol, late_meal") && out.contains("dinner out"));
@@ -149,12 +149,12 @@ fn tags_read_both_tag_collections() {
 fn workouts_and_sessions_derive_duration_and_sample_means() {
     let w = json!({"day": "2026-10-20", "activity": "running", "intensity": "moderate", "calories": 320.4, "distance": 6200.0,
                    "start_datetime": "2026-10-20T07:10:00-04:00", "end_datetime": "2026-10-20T07:55:00-04:00", "source": "autodetected"});
-    let out = render_table(&views::view("workouts").unwrap(), &[w]);
+    let out = render_table(&views::view("workouts").unwrap(), &[w], ny());
     assert!(out.contains("07:10–07:55") && out.contains("45m") && out.contains("320") && out.contains("6.2 km"), "{out}");
     let s = json!({"day": "2026-10-20", "type": "meditation", "mood": "good",
                    "start_datetime": "2026-10-20T12:30:00-04:00", "end_datetime": "2026-10-20T12:40:00-04:00",
                    "heart_rate": {"interval": 5, "items": [60, 62, null, 64]}, "heart_rate_variability": {"interval": 5, "items": [40, 50]}});
-    let out = render_table(&views::view("sessions").unwrap(), &[s]);
+    let out = render_table(&views::view("sessions").unwrap(), &[s], ny());
     assert!(out.contains("12:30–12:40") && out.contains("10m") && out.contains("good") && out.contains("62") && out.contains("45"), "{out}");
 }
 

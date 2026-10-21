@@ -136,9 +136,9 @@ fn error_summary(body: &[u8]) -> String {
 /// A short human-readable error string from a JSON error body, if there is one.
 pub fn short_message(body: &[u8]) -> Option<String> {
     let v: Value = serde_json::from_slice(body).ok()?;
-    let text = ["error_description", "message", "detail", "error"]
-        .iter()
-        .find_map(|k| v.get(*k).and_then(Value::as_str))?;
-    let clean: String = text.chars().filter(|c| !c.is_control()).take(160).collect();
-    (!clean.trim().is_empty()).then_some(clean)
+    // The first of these keys holding a non-blank string; a blank one doesn't hide the rest.
+    ["error_description", "message", "detail", "error"].iter().find_map(|k| {
+        let clean: String = v.get(*k)?.as_str()?.chars().filter(|c| !c.is_control()).take(160).collect();
+        (!clean.trim().is_empty()).then_some(clean)
+    })
 }

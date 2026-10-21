@@ -62,7 +62,7 @@ Rules:
 - A collection that fails with HTTP 401/403 usually means its scope wasn't granted. Say so, and suggest the user log in again with every scope ticked.
 - Missing is unknown, not zero. Don't fill gaps, and don't merge the two sources into one number. Report each value with its source.
 - Each source labels a night by its own `day`. Check `bedtime_start`/`bedtime_end` before comparing a night across sources.
-- Oura's night is its longest `long_sleep`. `other_periods` counts confirmed naps left out. Periods typed `deleted` (you deleted them) or `rest` (false detections you rejected) never count as sleep, but `somno sleep` still lists them.
+- Oura's night is its longest `long_sleep`. `other_periods` counts confirmed naps left out (always `null` for Eight Sleep). Periods typed `deleted` (you deleted them) or `rest` (false detections you rejected) never count as sleep, but `somno sleep` still lists them.
 - `somno day` marks a section "unavailable" when its data couldn't be fetched. That is not the same as none.
 - Eight Sleep uses an unofficial API that can change. Its "awake" is awake in bed; "out of bed" (`out_of_bed_s`) is separate. Eight Sleep usually counts more time in bed and more sleep than Oura (it detects the mattress, not the ring). Report both with their source, and don't call either one correct. Nights with `processing: true` aren't final.
 - "today" and displayed times use the system timezone. Pass `--tz America/New_York` if this machine is in another zone.

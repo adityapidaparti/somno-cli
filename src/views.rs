@@ -16,7 +16,8 @@ use crate::types::{fmt_duration, parse_timestamp};
 
 const DASH: &str = "—";
 
-pub type Cell = fn(&Value) -> Option<String>;
+/// A table cell from a document; `Tz` is the display zone.
+pub type Cell = fn(&Value, Tz) -> Option<String>;
 
 pub struct Column {
     pub header: &'static str,
@@ -63,16 +64,15 @@ fn distance(m: f64) -> String {
     if m >= 1000.0 { format!("{:.1} km", m / 1000.0) } else { format!("{m:.0} m") }
 }
 
-/// `HH:MM` in the timestamp's own offset (the local time where it happened).
-fn clock(s: Option<&str>) -> Option<String> {
-    parse_timestamp(s?).map(|t| t.format("%H:%M").to_string())
+/// `HH:MM` in the timestamp's own offset (the local time where it happened),
+/// with that offset when it differs from `tz`'s.
+fn clock(s: Option<&str>, tz: Tz) -> Option<String> {
+    parse_timestamp(s?).map(|t| crate::night::local_clock(&t, tz))
 }
 
-fn clock_span(d: &Value, start: &str, end: &str) -> Option<String> {
-    match (clock(text(d, &[start])), clock(text(d, &[end]))) {
-        (None, None) => None,
-        (a, b) => Some(format!("{}–{}", a.unwrap_or_else(|| "?".into()), b.unwrap_or_else(|| "?".into()))),
-    }
+fn clock_span(d: &Value, start: &str, end: &str, tz: Tz) -> Option<String> {
+    let (a, b) = (text(d, &[start]).and_then(parse_timestamp), text(d, &[end]).and_then(parse_timestamp));
+    crate::night::local_span(a.as_ref(), b.as_ref(), tz, "–")
 }
 
 fn span_secs(d: &Value, start: &str, end: &str) -> Option<f64> {
@@ -86,8 +86,9 @@ fn sample_items(v: &Value) -> Vec<f64> {
     v.get("items").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_f64).collect()).unwrap_or_default()
 }
 
+/// The mean, or unknown when there are no values or the sum overflows.
 fn mean(xs: &[f64]) -> Option<f64> {
-    (!xs.is_empty()).then(|| xs.iter().sum::<f64>() / xs.len() as f64)
+    (!xs.is_empty()).then(|| xs.iter().sum::<f64>() / xs.len() as f64).filter(|m| m.is_finite())
 }
 
 fn is_sample(m: &Map<String, Value>) -> bool {
@@ -126,14 +127,14 @@ pub fn views() -> Vec<View> {
             collections: &["daily_readiness"],
             first: &["day", "score", "temperature_deviation", "temperature_trend_deviation", "contributors"],
             columns: vec![
-                col("score", 6, |d| f0(num(d, &["score"]))),
-                col("temp dev", 10, |d| num(d, &["temperature_deviation"]).map(|v| format!("{v:+.2} °C"))),
-                col("trend", 10, |d| num(d, &["temperature_trend_deviation"]).map(|v| format!("{v:+.2} °C"))),
-                col("HRV bal", 8, |d| f0(num(d, &["contributors", "hrv_balance"]))),
-                col("RHR score", 10, |d| f0(num(d, &["contributors", "resting_heart_rate"]))),
-                col("recovery", 9, |d| f0(num(d, &["contributors", "recovery_index"]))),
-                col("sleep bal", 10, |d| f0(num(d, &["contributors", "sleep_balance"]))),
-                col("activity bal", 12, |d| f0(num(d, &["contributors", "activity_balance"]))),
+                col("score", 6, |d, _| f0(num(d, &["score"]))),
+                col("temp dev", 10, |d, _| num(d, &["temperature_deviation"]).map(|v| format!("{v:+.2} °C"))),
+                col("trend", 10, |d, _| num(d, &["temperature_trend_deviation"]).map(|v| format!("{v:+.2} °C"))),
+                col("HRV bal", 8, |d, _| f0(num(d, &["contributors", "hrv_balance"]))),
+                col("RHR score", 10, |d, _| f0(num(d, &["contributors", "resting_heart_rate"]))),
+                col("recovery", 9, |d, _| f0(num(d, &["contributors", "recovery_index"]))),
+                col("sleep bal", 10, |d, _| f0(num(d, &["contributors", "sleep_balance"]))),
+                col("activity bal", 12, |d, _| f0(num(d, &["contributors", "activity_balance"]))),
             ],
         },
         View {
@@ -147,14 +148,14 @@ pub fn views() -> Vec<View> {
                 "restless_periods", "readiness",
             ],
             columns: vec![
-                col("type", 11, |d| text(d, &["type"]).map(str::to_string)),
-                col("in bed", 12, |d| clock_span(d, "bedtime_start", "bedtime_end")),
-                col("asleep", 8, |d| dur(num(d, &["total_sleep_duration"]))),
-                col("deep", 8, |d| dur(num(d, &["deep_sleep_duration"]))),
-                col("REM", 8, |d| dur(num(d, &["rem_sleep_duration"]))),
-                col("eff", 5, |d| num(d, &["efficiency"]).map(|v| format!("{v:.0}%"))),
-                col("HR low", 7, |d| f0(num(d, &["lowest_heart_rate"]))),
-                col("HRV", 5, |d| f0(num(d, &["average_hrv"]))),
+                col("type", 11, |d, _| text(d, &["type"]).map(str::to_string)),
+                col("in bed", 12, |d, tz| clock_span(d, "bedtime_start", "bedtime_end", tz)),
+                col("asleep", 8, |d, _| dur(num(d, &["total_sleep_duration"]))),
+                col("deep", 8, |d, _| dur(num(d, &["deep_sleep_duration"]))),
+                col("REM", 8, |d, _| dur(num(d, &["rem_sleep_duration"]))),
+                col("eff", 5, |d, _| num(d, &["efficiency"]).map(|v| format!("{v:.0}%"))),
+                col("HR low", 7, |d, _| f0(num(d, &["lowest_heart_rate"]))),
+                col("HRV", 5, |d, _| f0(num(d, &["average_hrv"]))),
             ],
         },
         View {
@@ -163,14 +164,14 @@ pub fn views() -> Vec<View> {
             collections: &["daily_sleep"],
             first: &["day", "score", "contributors"],
             columns: vec![
-                col("score", 6, |d| f0(num(d, &["score"]))),
-                col("total", 6, |d| f0(num(d, &["contributors", "total_sleep"]))),
-                col("deep", 5, |d| f0(num(d, &["contributors", "deep_sleep"]))),
-                col("REM", 5, |d| f0(num(d, &["contributors", "rem_sleep"]))),
-                col("effic", 6, |d| f0(num(d, &["contributors", "efficiency"]))),
-                col("latency", 8, |d| f0(num(d, &["contributors", "latency"]))),
-                col("restful", 8, |d| f0(num(d, &["contributors", "restfulness"]))),
-                col("timing", 6, |d| f0(num(d, &["contributors", "timing"]))),
+                col("score", 6, |d, _| f0(num(d, &["score"]))),
+                col("total", 6, |d, _| f0(num(d, &["contributors", "total_sleep"]))),
+                col("deep", 5, |d, _| f0(num(d, &["contributors", "deep_sleep"]))),
+                col("REM", 5, |d, _| f0(num(d, &["contributors", "rem_sleep"]))),
+                col("effic", 6, |d, _| f0(num(d, &["contributors", "efficiency"]))),
+                col("latency", 8, |d, _| f0(num(d, &["contributors", "latency"]))),
+                col("restful", 8, |d, _| f0(num(d, &["contributors", "restfulness"]))),
+                col("timing", 6, |d, _| f0(num(d, &["contributors", "timing"]))),
             ],
         },
         View {
@@ -183,14 +184,14 @@ pub fn views() -> Vec<View> {
                 "sedentary_time", "resting_time", "non_wear_time", "inactivity_alerts", "contributors",
             ],
             columns: vec![
-                col("score", 6, |d| f0(num(d, &["score"]))),
-                col("steps", 8, |d| num(d, &["steps"]).map(thousands)),
-                col("active kcal", 12, |d| num(d, &["active_calories"]).map(thousands)),
-                col("total kcal", 11, |d| num(d, &["total_calories"]).map(thousands)),
-                col("high", 8, |d| dur(num(d, &["high_activity_time"]))),
-                col("medium", 8, |d| dur(num(d, &["medium_activity_time"]))),
-                col("low", 8, |d| dur(num(d, &["low_activity_time"]))),
-                col("sedentary", 10, |d| dur(num(d, &["sedentary_time"]))),
+                col("score", 6, |d, _| f0(num(d, &["score"]))),
+                col("steps", 8, |d, _| num(d, &["steps"]).map(thousands)),
+                col("active kcal", 12, |d, _| num(d, &["active_calories"]).map(thousands)),
+                col("total kcal", 11, |d, _| num(d, &["total_calories"]).map(thousands)),
+                col("high", 8, |d, _| dur(num(d, &["high_activity_time"]))),
+                col("medium", 8, |d, _| dur(num(d, &["medium_activity_time"]))),
+                col("low", 8, |d, _| dur(num(d, &["low_activity_time"]))),
+                col("sedentary", 10, |d, _| dur(num(d, &["sedentary_time"]))),
             ],
         },
         View {
@@ -199,9 +200,9 @@ pub fn views() -> Vec<View> {
             collections: &["daily_stress"],
             first: &["day", "day_summary", "stress_high", "recovery_high"],
             columns: vec![
-                col("summary", 10, |d| text(d, &["day_summary"]).map(str::to_string)),
-                col("high stress", 12, |d| dur(num(d, &["stress_high"]))),
-                col("high recovery", 14, |d| dur(num(d, &["recovery_high"]))),
+                col("summary", 10, |d, _| text(d, &["day_summary"]).map(str::to_string)),
+                col("high stress", 12, |d, _| dur(num(d, &["stress_high"]))),
+                col("high recovery", 14, |d, _| dur(num(d, &["recovery_high"]))),
             ],
         },
         View {
@@ -210,10 +211,10 @@ pub fn views() -> Vec<View> {
             collections: &["daily_resilience"],
             first: &["day", "level", "contributors"],
             columns: vec![
-                col("level", 12, |d| text(d, &["level"]).map(str::to_string)),
-                col("sleep rec", 10, |d| f0(num(d, &["contributors", "sleep_recovery"]))),
-                col("daytime rec", 12, |d| f0(num(d, &["contributors", "daytime_recovery"]))),
-                col("stress", 6, |d| f0(num(d, &["contributors", "stress"]))),
+                col("level", 12, |d, _| text(d, &["level"]).map(str::to_string)),
+                col("sleep rec", 10, |d, _| f0(num(d, &["contributors", "sleep_recovery"]))),
+                col("daytime rec", 12, |d, _| f0(num(d, &["contributors", "daytime_recovery"]))),
+                col("stress", 6, |d, _| f0(num(d, &["contributors", "stress"]))),
             ],
         },
         View {
@@ -222,8 +223,8 @@ pub fn views() -> Vec<View> {
             collections: &["daily_spo2"],
             first: &["day", "spo2_percentage", "breathing_disturbance_index"],
             columns: vec![
-                col("SpO2 avg", 9, |d| num(d, &["spo2_percentage", "average"]).map(|v| format!("{v:.1}%"))),
-                col("breathing disturbance", 21, |d| f0(num(d, &["breathing_disturbance_index"]))),
+                col("SpO2 avg", 9, |d, _| num(d, &["spo2_percentage", "average"]).map(|v| format!("{v:.1}%"))),
+                col("breathing disturbance", 21, |d, _| f0(num(d, &["breathing_disturbance_index"]))),
             ],
         },
         View {
@@ -232,8 +233,8 @@ pub fn views() -> Vec<View> {
             collections: &["daily_cardiovascular_age"],
             first: &["day", "vascular_age", "pulse_wave_velocity"],
             columns: vec![
-                col("vascular age", 13, |d| f0(num(d, &["vascular_age"]))),
-                col("pulse wave velocity", 19, |d| num(d, &["pulse_wave_velocity"]).map(|v| format!("{v:.1} m/s"))),
+                col("vascular age", 13, |d, _| f0(num(d, &["vascular_age"]))),
+                col("pulse wave velocity", 19, |d, _| num(d, &["pulse_wave_velocity"]).map(|v| format!("{v:.1} m/s"))),
             ],
         },
         View {
@@ -241,7 +242,7 @@ pub fn views() -> Vec<View> {
             title: "VO2 max",
             collections: &["vO2_max"],
             first: &["day", "vo2_max", "timestamp"],
-            columns: vec![col("VO2 max", 8, |d| f0(num(d, &["vo2_max"])))],
+            columns: vec![col("VO2 max", 8, |d, _| f0(num(d, &["vo2_max"])))],
         },
         View {
             name: "workouts",
@@ -249,13 +250,13 @@ pub fn views() -> Vec<View> {
             collections: &["workout"],
             first: &["day", "activity", "label", "intensity", "start_datetime", "end_datetime", "calories", "distance", "source"],
             columns: vec![
-                col("time", 12, |d| clock_span(d, "start_datetime", "end_datetime")),
-                col("activity", 16, |d| text(d, &["label"]).or(text(d, &["activity"])).map(|s| s.replace('_', " "))),
-                col("intensity", 10, |d| text(d, &["intensity"]).map(str::to_string)),
-                col("duration", 9, |d| dur(span_secs(d, "start_datetime", "end_datetime"))),
-                col("kcal", 6, |d| f0(num(d, &["calories"]))),
-                col("distance", 9, |d| num(d, &["distance"]).map(distance)),
-                col("source", 12, |d| text(d, &["source"]).map(|s| s.replace('_', " "))),
+                col("time", 12, |d, tz| clock_span(d, "start_datetime", "end_datetime", tz)),
+                col("activity", 16, |d, _| text(d, &["label"]).or(text(d, &["activity"])).map(|s| s.replace('_', " "))),
+                col("intensity", 10, |d, _| text(d, &["intensity"]).map(str::to_string)),
+                col("duration", 9, |d, _| dur(span_secs(d, "start_datetime", "end_datetime"))),
+                col("kcal", 6, |d, _| f0(num(d, &["calories"]))),
+                col("distance", 9, |d, _| num(d, &["distance"]).map(distance)),
+                col("source", 12, |d, _| text(d, &["source"]).map(|s| s.replace('_', " "))),
             ],
         },
         View {
@@ -264,12 +265,12 @@ pub fn views() -> Vec<View> {
             collections: &["session"],
             first: &["day", "type", "start_datetime", "end_datetime", "mood", "heart_rate", "heart_rate_variability", "motion_count"],
             columns: vec![
-                col("time", 12, |d| clock_span(d, "start_datetime", "end_datetime")),
-                col("type", 12, |d| text(d, &["type"]).map(|s| s.replace('_', " "))),
-                col("duration", 9, |d| dur(span_secs(d, "start_datetime", "end_datetime"))),
-                col("mood", 6, |d| text(d, &["mood"]).map(str::to_string)),
-                col("HR avg", 7, |d| f0(d.get("heart_rate").and_then(|v| mean(&sample_items(v))))),
-                col("HRV avg", 8, |d| f0(d.get("heart_rate_variability").and_then(|v| mean(&sample_items(v))))),
+                col("time", 12, |d, tz| clock_span(d, "start_datetime", "end_datetime", tz)),
+                col("type", 12, |d, _| text(d, &["type"]).map(|s| s.replace('_', " "))),
+                col("duration", 9, |d, _| dur(span_secs(d, "start_datetime", "end_datetime"))),
+                col("mood", 6, |d, _| text(d, &["mood"]).map(str::to_string)),
+                col("HR avg", 7, |d, _| f0(d.get("heart_rate").and_then(|v| mean(&sample_items(v))))),
+                col("HRV avg", 8, |d, _| f0(d.get("heart_rate_variability").and_then(|v| mean(&sample_items(v))))),
             ],
         },
         View {
@@ -278,12 +279,12 @@ pub fn views() -> Vec<View> {
             collections: &["enhanced_tag", "tag"],
             first: &["day", "start_day", "start_time", "end_day", "end_time", "tag_type_code", "custom_name", "tags", "comment", "text", "timestamp"],
             columns: vec![
-                col("time", 12, |d| match text(d, &["end_time"]) {
-                    Some(_) => clock_span(d, "start_time", "end_time"),
-                    None => clock(text(d, &["start_time"]).or(text(d, &["timestamp"]))),
+                col("time", 12, |d, tz| match text(d, &["end_time"]) {
+                    Some(_) => clock_span(d, "start_time", "end_time", tz),
+                    None => clock(text(d, &["start_time"]).or(text(d, &["timestamp"])), tz),
                 }),
-                col("tag", 24, tag_name),
-                col("note", 30, |d| text(d, &["comment"]).or(text(d, &["text"])).map(str::to_string)),
+                col("tag", 24, |d, _| tag_name(d)),
+                col("note", 30, |d, _| text(d, &["comment"]).or(text(d, &["text"])).map(str::to_string)),
             ],
         },
         View {
@@ -292,9 +293,9 @@ pub fn views() -> Vec<View> {
             collections: &["sleep_time"],
             first: &["day", "optimal_bedtime", "recommendation", "status"],
             columns: vec![
-                col("window", 12, |d| d.get("optimal_bedtime").and_then(bedtime_window)),
-                col("recommendation", 24, |d| text(d, &["recommendation"]).map(|s| s.replace('_', " "))),
-                col("status", 24, |d| text(d, &["status"]).map(|s| s.replace('_', " "))),
+                col("window", 12, |d, _| d.get("optimal_bedtime").and_then(bedtime_window)),
+                col("recommendation", 24, |d, _| text(d, &["recommendation"]).map(|s| s.replace('_', " "))),
+                col("status", 24, |d, _| text(d, &["status"]).map(|s| s.replace('_', " "))),
             ],
         },
         View {
@@ -303,8 +304,8 @@ pub fn views() -> Vec<View> {
             collections: &["rest_mode_period"],
             first: &["start_day", "start_time", "end_day", "end_time", "episodes"],
             columns: vec![
-                col("until", 12, |d| text(d, &["end_day"]).map(str::to_string).or(Some("ongoing".into()))),
-                col("episodes", 9, |d| d.get("episodes").and_then(Value::as_array).map(|a| a.len().to_string())),
+                col("until", 12, |d, _| text(d, &["end_day"]).map(str::to_string).or(Some("ongoing".into()))),
+                col("episodes", 9, |d, _| d.get("episodes").and_then(Value::as_array).map(|a| a.len().to_string())),
             ],
         },
     ]
@@ -335,8 +336,9 @@ pub fn in_range(collection: &str, d: &Value, start: NaiveDate, end: NaiveDate) -
         return false;
     }
     let Some(first) = doc_day(d) else { return false };
-    // No `day` means the day came from `start_day`: a span.
-    if d.get("day").is_none() {
+    // No `day` (missing, null or not a date) means the day came from
+    // `start_day`: a span.
+    if parse_day(text(d, &["day"])).is_none() {
         let open_end = if collection == "enhanced_tag" { first } else { NaiveDate::MAX };
         let last = parse_day(text(d, &["end_day"])).unwrap_or(open_end);
         return first <= end && last >= start;
@@ -351,21 +353,24 @@ pub fn select(collection: &str, docs: impl IntoIterator<Item = Value>, start: Na
     out
 }
 
-/// Chronological order: by day, then by the document's own start time.
+/// The order documents are listed in: by day, then the document's own start
+/// time, then id, then the document text, so ties never keep the API's order.
+pub fn order_key(d: &Value) -> (Option<NaiveDate>, Option<DateTime<chrono::Utc>>, String, String) {
+    let when = ["start_datetime", "bedtime_start", "start_time", "timestamp"]
+        .iter()
+        .find_map(|k| text(d, &[k]).and_then(parse_timestamp))
+        .map(|t| t.with_timezone(&chrono::Utc));
+    (doc_day(d), when, text(d, &["id"]).unwrap_or("").to_string(), d.to_string())
+}
+
+/// Chronological order (see `order_key`).
 pub fn sort_docs(docs: &mut [Value]) {
-    let key = |d: &Value| {
-        let when = ["start_datetime", "bedtime_start", "start_time", "timestamp"]
-            .iter()
-            .find_map(|k| text(d, &[k]).and_then(parse_timestamp))
-            .map(|t| t.with_timezone(&chrono::Utc));
-        (doc_day(d), when)
-    };
-    docs.sort_by_key(key);
+    docs.sort_by_cached_key(order_key);
 }
 
 // ---- rendering ----
 
-pub fn render_table(view: &View, docs: &[Value]) -> String {
+pub fn render_table(view: &View, docs: &[Value], tz: Tz) -> String {
     let mut out = format!("{:<12}", "day");
     for c in &view.columns {
         out += &format!("{:<w$}", c.header, w = c.width + 1);
@@ -374,7 +379,7 @@ pub fn render_table(view: &View, docs: &[Value]) -> String {
     for d in docs {
         let mut line = format!("{:<12}", doc_day(d).map(|d| d.to_string()).unwrap_or_default());
         for c in &view.columns {
-            line += &format!("{:<w$}", (c.cell)(d).unwrap_or_else(|| DASH.into()), w = c.width + 1);
+            line += &format!("{:<w$}", (c.cell)(d, tz).unwrap_or_else(|| DASH.into()), w = c.width + 1);
         }
         out += line.trim_end();
         out.push('\n');
@@ -542,8 +547,9 @@ impl HrStats {
         *self.by_source.entry(source.to_string()).or_default() += 1;
     }
 
+    /// Unknown when the sum overflows; never outside `min..=max` from rounding.
     pub fn avg(&self) -> Option<f64> {
-        (self.samples > 0).then(|| self.sum / self.samples as f64)
+        (self.samples > 0).then(|| self.sum / self.samples as f64).filter(|a| a.is_finite()).map(|a| a.clamp(self.min, self.max))
     }
 }
 
@@ -558,10 +564,17 @@ pub fn hr_buckets(samples: &[Value], tz: Tz, by_hour: bool) -> BTreeMap<HrKey, H
     for s in samples {
         let (Some(bpm), Some(t)) = (num(s, &["bpm"]), text(s, &["timestamp"]).and_then(parse_timestamp)) else { continue };
         let local = t.with_timezone(&tz);
-        let hour = by_hour.then(|| {
-            let since_hour = chrono::Duration::seconds(i64::from(local.minute() * 60 + local.second())) + chrono::Duration::nanoseconds(i64::from(local.nanosecond()));
-            (local - since_hour).fixed_offset()
-        });
+        // The local clock hour in the sample's own offset, so a 30-minute DST
+        // change (Lord Howe) can't shift a bucket off the hour.
+        let hour = if by_hour {
+            let offset = local.offset().fix();
+            match local.date_naive().and_hms_opt(local.hour(), 0, 0).and_then(|h| h.and_local_timezone(offset).single()) {
+                Some(h) => Some(h),
+                None => continue,
+            }
+        } else {
+            None
+        };
         out.entry((local.date_naive(), hour)).or_default().add(bpm, text(s, &["source"]).unwrap_or("unknown"));
     }
     out
@@ -623,7 +636,7 @@ pub fn render_day(day: NaiveDate, tz: Tz, docs: &BTreeMap<String, Vec<Value>>, e
         let main_text = main.map(|p| {
             format!(
                 "{}, {} asleep (deep {}, REM {})",
-                clock_span(p, "bedtime_start", "bedtime_end").unwrap_or_else(|| DASH.into()),
+                clock_span(p, "bedtime_start", "bedtime_end", tz).unwrap_or_else(|| DASH.into()),
                 dur(num(p, &["total_sleep_duration"])).unwrap_or_else(|| DASH.into()),
                 dur(num(p, &["deep_sleep_duration"])).unwrap_or_else(|| DASH.into()),
                 dur(num(p, &["rem_sleep_duration"])).unwrap_or_else(|| DASH.into()),
@@ -681,7 +694,7 @@ pub fn render_day(day: NaiveDate, tz: Tz, docs: &BTreeMap<String, Vec<Value>>, e
     line("workouts", &["workout"], list("workout", &|d| {
         format!(
             "{} {} {}",
-            clock_span(d, "start_datetime", "end_datetime").unwrap_or_default(),
+            clock_span(d, "start_datetime", "end_datetime", tz).unwrap_or_default(),
             text(d, &["label"]).or(text(d, &["activity"])).unwrap_or("workout").replace('_', " "),
             f0(num(d, &["calories"])).map(|k| format!("{k} kcal")).unwrap_or_default()
         )
@@ -691,7 +704,7 @@ pub fn render_day(day: NaiveDate, tz: Tz, docs: &BTreeMap<String, Vec<Value>>, e
     line("sessions", &["session"], list("session", &|d| {
         format!(
             "{} {}",
-            clock_span(d, "start_datetime", "end_datetime").unwrap_or_default(),
+            clock_span(d, "start_datetime", "end_datetime", tz).unwrap_or_default(),
             text(d, &["type"]).unwrap_or("session")
         )
         .trim()

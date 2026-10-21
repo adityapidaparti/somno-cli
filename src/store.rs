@@ -14,7 +14,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 pub fn config_dir() -> Result<PathBuf> {
-    if let Some(dir) = std::env::var_os("SOMNO_CONFIG_DIR") {
+    if let Some(dir) = std::env::var_os("SOMNO_CONFIG_DIR").filter(|d| !d.is_empty()) {
         return Ok(PathBuf::from(dir));
     }
     let dirs = directories::ProjectDirs::from("", "", "somno")

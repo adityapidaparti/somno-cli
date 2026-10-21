@@ -51,7 +51,7 @@ fn oura_main_period_fields_and_daily_scores() {
     assert_eq!(n.sleep_score, Some(82.0));
     assert_eq!(n.readiness_score, Some(79.0));
     assert_eq!(n.temp_deviation_c, Some(0.12));
-    assert_eq!(n.other_periods, 1, "the late nap is counted, not merged");
+    assert_eq!(n.other_periods, Some(1), "the late nap is counted, not merged");
     assert_eq!(n.bedtime_start.unwrap().to_rfc3339(), "2026-10-17T23:41:00-04:00");
 }
 
@@ -62,7 +62,7 @@ fn oura_picks_longest_long_sleep_and_ignores_deleted() {
     assert_eq!(n.source_id.as_deref(), Some("s-oct19-long"));
     assert_eq!(n.hrv_avg_ms, None, "null is unknown, not zero");
     assert_eq!(n.sleep_score, None);
-    assert_eq!(n.other_periods, 1, "deleted period is not counted");
+    assert_eq!(n.other_periods, Some(1), "deleted period is not counted");
 }
 
 #[test]
@@ -371,7 +371,7 @@ fn log_urls_redact_credentials_and_oauth_values() {
     let dated = reqwest::Url::parse("https://api.ouraring.com/v2/usercollection/sleep?start_date=2026-10-17&end_date=2026-10-21&next_token=tok").unwrap();
     assert_eq!(
         somno::log::redact_url(&dated),
-        "https://api.ouraring.com/v2/usercollection/sleep?start_date=2026-10-17&end_date=2026-10-21&next_token=%E2%80%A6"
+        "https://api.ouraring.com/v2/usercollection/sleep?start_date=2026-10-17&end_date=2026-10-21&next_token=redacted"
     );
 }
 

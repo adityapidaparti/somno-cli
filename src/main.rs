@@ -239,7 +239,7 @@ fn run() -> Result<()> {
             if end < start {
                 bail!("END ({end}) is before START ({start})");
             }
-            if (end - start).num_days() > 400 {
+            if (end - start).num_days() >= 400 {
                 bail!("range is limited to 400 nights; split it up");
             }
             show(&days_inclusive(start, end), tz, &view, false)
@@ -426,7 +426,7 @@ fn show_view(name: &str, r: &RangeArgs, tz: Tz, today: NaiveDate) -> Result<()> 
         if docs.is_empty() {
             println!("nothing recorded");
         } else {
-            print!("{}", views::render_table(&view, &docs));
+            print!("{}", views::render_table(&view, &docs, tz));
         }
     }
     for (c, e) in &errors {

@@ -25,7 +25,7 @@ const REDACTED_PARAMS: &[&str] = &[
 
 pub fn path() -> Option<PathBuf> {
     match std::env::var_os("SOMNO_LOG") {
-        Some(v) if v == "off" => None,
+        Some(v) if v.eq_ignore_ascii_case("off") => None,
         Some(v) if !v.is_empty() => Some(PathBuf::from(v)),
         _ => crate::store::config_dir().ok().map(|d| d.join("somno.log")),
     }
@@ -77,33 +77,46 @@ fn append(path: &PathBuf, line: &str) -> std::io::Result<()> {
     file.write_all(line.as_bytes())
 }
 
-/// The URL with sensitive query values replaced by `…`.
+/// The URL with sensitive values replaced by `redacted`: query parameters
+/// named in `REDACTED_PARAMS` (in any letter case), the whole fragment, and
+/// any user name or password.
 pub fn redact_url(url: &Url) -> String {
     let mut clean = url.clone();
     let pairs: Vec<(String, String)> = url
         .query_pairs()
         .map(|(k, v)| {
-            let v = if REDACTED_PARAMS.contains(&k.as_ref()) { "…".to_string() } else { v.into_owned() };
-            (k.into_owned(), v)
+            let secret = REDACTED_PARAMS.iter().any(|p| p.eq_ignore_ascii_case(&k));
+            (k.into_owned(), if secret { "redacted".to_string() } else { v.into_owned() })
         })
         .collect();
     clean.set_query(None);
     if !pairs.is_empty() {
         clean.query_pairs_mut().extend_pairs(pairs);
     }
+    if clean.fragment().is_some() {
+        clean.set_fragment(Some("redacted"));
+    }
     clean.set_username("").ok();
     clean.set_password(None).ok();
     clean.to_string()
 }
 
-/// The last `n` lines of the log.
+/// The last `n` lines of the log, reaching into the rotated `somno.log.1`
+/// when the current file has fewer.
 pub fn tail(n: usize) -> std::io::Result<Vec<String>> {
     let Some(path) = path() else { return Ok(vec![]) };
-    let text = match fs::read_to_string(&path) {
-        Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
-        Err(e) => return Err(e),
+    let read = |p: &std::path::Path| match fs::read_to_string(p) {
+        Ok(t) => Ok(t.lines().map(str::to_string).collect::<Vec<_>>()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(vec![]),
+        Err(e) => Err(e),
     };
-    let lines: Vec<String> = text.lines().map(str::to_string).collect();
+    let mut lines = read(&path)?;
+    if lines.len() < n {
+        let mut rotated = path.clone().into_os_string();
+        rotated.push(".1");
+        let mut older = read(std::path::Path::new(&rotated))?;
+        older.append(&mut lines);
+        lines = older;
+    }
     Ok(lines[lines.len().saturating_sub(n)..].to_vec())
 }

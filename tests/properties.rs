@@ -21,7 +21,7 @@ mod common;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use chrono::{DateTime, Duration, FixedOffset, NaiveDate, Timelike};
+use chrono::{DateTime, Duration, FixedOffset, NaiveDate, Offset, Timelike};
 use chrono_tz::Tz;
 use common::*;
 use hegel::prelude::*;
@@ -45,6 +45,22 @@ fn ts(s: &str) -> DateTime<FixedOffset> {
 
 fn d(s: &str) -> NaiveDate {
     NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()
+}
+
+fn zone(name: &str) -> Tz {
+    name.parse().unwrap()
+}
+
+/// Display zones with unusual clocks: US Eastern; Lord Howe (30-minute DST);
+/// Kathmandu (+05:45); Havana, Santiago and Beirut (DST skips midnight).
+const ZONES: [&str; 6] = ["America/New_York", "Australia/Lord_Howe", "Asia/Kathmandu", "America/Havana", "America/Santiago", "Asia/Beirut"];
+
+/// The documents in an order the test draws.
+fn shuffle(tc: &TestCase, docs: &[Value]) -> Vec<Value> {
+    let order: Vec<usize> = tc.draw(gs::vecs(gs::integers::<usize>()).min_size(docs.len()).max_size(docs.len()));
+    let mut keyed: Vec<(usize, Value)> = order.into_iter().zip(docs.iter().cloned()).collect();
+    keyed.sort_by_key(|(k, _)| *k);
+    keyed.into_iter().map(|(_, doc)| doc).collect()
 }
 
 /// Adjacent runs of the same stage merged: the structure the decoder must find.
@@ -73,11 +89,14 @@ fn field<'a>(out: &'a str, label: &str) -> &'a str {
     out.lines().find_map(|l| l.strip_prefix(label)).unwrap_or_else(|| panic!("no {label} row in\n{out}")).trim()
 }
 
-/// The latency somno should use: within the period, else none.
-fn usable_latency(p: &Period) -> Option<usize> {
+/// The latency somno should use, in whole seconds: within the period and no
+/// later than the end of the last sleep epoch, else none.
+fn usable_latency(p: &Period) -> Option<i64> {
+    let last_sleep_end = p.codes().rfind(|c| c != '4').map(|b| (b as i64 + 1) * 30);
     p.latency
         .filter(|l| l.is_finite() && *l >= 0.0 && *l <= (p.epochs() * 30) as f64)
-        .map(|l| (l as i64 / 30) as usize)
+        .map(|l| l as i64)
+        .filter(|l| last_sleep_end.is_none_or(|end| *l <= end))
 }
 
 const COLLECTIONS: [&str; 3] = ["sleep", "rest_mode_period", "enhanced_tag"];
@@ -87,7 +106,8 @@ const COLLECTIONS: [&str; 3] = ["sleep", "rest_mode_period", "enhanced_tag"];
 // ---------------------------------------------------------------------------
 
 /// Something shaped like a day: a keyword, `-N` for any integer (so `--N`),
-/// `+N`, a date, or arbitrary text.
+/// `+N`, a date, a date at the edge of the calendar or with a signed or
+/// six-digit year, or arbitrary text.
 #[hegel::composite]
 fn typed_days(tc: &TestCase) -> String {
     tc.draw(hegel::one_of!(
@@ -95,8 +115,23 @@ fn typed_days(tc: &TestCase) -> String {
         gs::integers::<i64>().map(|n| format!("-{n}")),
         gs::integers::<i64>().map(|n| format!("+{n}")),
         any_day().map(|day| day.format("%Y-%m-%d").to_string()),
+        gs::sampled_from(&["+262142-12-31", "-262143-01-01", "262142-12-31", "9999-12-31", "0000-01-01"][..]).map(|w: &str| w.to_string()),
+        gs::from_regex(r"[+-]?[0-9]{4,6}-[0-9]{2}-[0-9]{2}"),
         gs::text(),
     ))
+}
+
+/// Any day somno accepts can be looked up (a window around it, a week
+/// ending on it) without crashing, however far from today it is.
+#[hegel::test]
+fn any_accepted_day_can_be_looked_up_without_crashing(tc: TestCase) {
+    let typed = tc.draw(typed_days());
+    let today = tc.draw(any_day());
+    let Ok(spec) = typed.parse::<DaySpec>() else { return };
+    let day = spec.resolve(today);
+    let (a, b) = oura::query_window("enhanced_tag", day, day);
+    let _ = oura::window_params("heartrate", Some(a), Some(b + Duration::days(1)), ny());
+    assert_eq!(days_inclusive(day - Duration::days(6), day).len(), 7);
 }
 
 /// Typing anything as a day gives a day or an error message, never a crash.
@@ -291,15 +326,15 @@ fn fell_asleep_is_oura_onset_when_it_lies_inside_the_night(tc: TestCase) {
     let Some(h) = Hypnogram::from_doc(&p.doc()) else { return };
     let codes: Vec<char> = p.codes().chars().collect();
     let first = codes.iter().position(|c| *c != '4').map(|i| p.start + Duration::seconds(i as i64 * 30));
-    let onset = p.latency.filter(|l| l.is_finite() && *l >= 0.0 && *l <= (p.epochs() * 30) as f64).map(|l| p.start + Duration::seconds(l as i64));
+    let onset = usable_latency(&p).map(|l| p.start + Duration::seconds(l));
     if p.latency.is_some() && onset.is_none() {
-        tc.event("latency outside the night");
+        tc.event("latency outside the night or after the last sleep");
     }
     assert_eq!(events(&h, p.latency).fell_asleep, onset.or(first));
 }
 
-/// Wake-ups are counted from the "fell asleep" time shown to the last epoch
-/// of sleep, so falling asleep isn't counted as waking up.
+/// Wake-ups are counted from the "fell asleep" time shown to the end of the
+/// last sleep, to the second, so falling asleep isn't counted as waking up.
 #[hegel::test]
 fn wake_time_counts_from_the_shown_onset_to_the_last_sleep(tc: TestCase) {
     let p = tc.draw(period());
@@ -310,23 +345,39 @@ fn wake_time_counts_from_the_shown_onset_to_the_last_sleep(tc: TestCase) {
         assert_eq!((e.awake_between_seconds, e.awakenings_5min), (0, 0));
         return;
     };
-    let from = usable_latency(&p).unwrap_or(a);
-    let mut runs: Vec<usize> = Vec::new();
-    let mut current = 0;
-    for (i, c) in codes.iter().enumerate() {
-        if *c == '4' && i >= from && i <= b {
-            current += 1;
-        } else if current > 0 {
-            runs.push(current);
-            current = 0;
+    let (from, to) = (usable_latency(&p).unwrap_or(a as i64 * 30), (b as i64 + 1) * 30);
+    let mut stretches: Vec<i64> = Vec::new();
+    let mut pos = 0i64;
+    for (c, n) in merged(&p.runs) {
+        let (lo, hi) = ((pos * 30).max(from), ((pos + n as i64) * 30).min(to));
+        if c == '4' && hi > lo {
+            stretches.push(hi - lo);
         }
-    }
-    if current > 0 {
-        runs.push(current);
+        pos += n as i64;
     }
     let e = events(&h, p.latency);
-    assert_eq!(e.awake_between_seconds, runs.iter().sum::<usize>() as i64 * 30);
-    assert_eq!(e.awakenings_5min, runs.iter().filter(|n| **n >= 10).count());
+    assert_eq!(e.awake_between_seconds, stretches.iter().sum::<i64>());
+    assert_eq!(e.awakenings_5min, stretches.iter().filter(|s| **s >= 300).count());
+}
+
+/// "Fell asleep" is never after "woke for good", and the awake time between
+/// them fits between them.
+#[hegel::test]
+fn falling_asleep_comes_before_waking_for_good(tc: TestCase) {
+    let mut p = tc.draw(period());
+    // Often an awake tail, and a latency anywhere in the period, so Oura's
+    // onset can land after the last sleep.
+    if tc.draw(gs::booleans()) {
+        p.runs.push(('4', tc.draw(gs::integers::<usize>().min_value(1).max_value(120))));
+    }
+    if tc.draw(gs::booleans()) {
+        p.latency = Some(tc.draw(gs::integers::<i64>().min_value(0).max_value(p.epochs() as i64 * 30)) as f64);
+    }
+    let Some(h) = Hypnogram::from_doc(&p.doc()) else { return };
+    let e = events(&h, p.latency);
+    let (Some(fell), Some(woke)) = (e.fell_asleep, e.woke_for_good) else { return };
+    assert!(fell <= woke, "fell asleep {fell} after woke for good {woke}");
+    assert!(e.awake_between_seconds <= (woke - fell).num_seconds());
 }
 
 /// First deep sleep, first REM, first sleep and the end of the last sleep are
@@ -352,6 +403,22 @@ fn movement_counts_each_30_seconds(tc: TestCase) {
     let count = |code: char| p.movement.iter().filter(|c| **c == code).count() as i64 * 30;
     let expected = (!p.movement.is_empty()).then(|| vec![("still", count('1')), ("restless", count('2')), ("tossing and turning", count('3')), ("active", count('4'))]);
     assert_eq!(movement(&p.doc()), expected);
+}
+
+/// Each segment's length in the text is exact to the second.
+#[hegel::test]
+fn segment_lengths_in_the_text_are_exact(tc: TestCase) {
+    let p = tc.draw(period());
+    let width = tc.draw(gs::integers::<usize>().min_value(20).max_value(400));
+    let out = somno::stages::render_period(&p.doc(), width, true);
+    let Some((_, segments)) = out.split_once("\n  segments\n") else { return };
+    let seconds = |token: &str| -> i64 {
+        let (n, unit) = token.split_at(token.len() - 1);
+        n.parse::<i64>().unwrap() * match unit { "h" => 3600, "m" => 60, "s" => 1, u => panic!("unit {u} in {token}") }
+    };
+    let shown: Vec<i64> = segments.lines().map(|l| l.split_whitespace().skip(2).map(seconds).sum()).collect();
+    let model: Vec<i64> = merged(&p.runs).iter().map(|(_, n)| *n as i64 * 30).collect();
+    assert_eq!(shown, model);
 }
 
 /// The JSON segments cover the night exactly: back to back, right stage,
@@ -438,16 +505,22 @@ fn chart_hour_marks_are_complete_and_correct(tc: TestCase) {
     assert_eq!(lines[5].trim(), format!("one column ≈ {}", fmt_duration((per as i64 * h.epoch_secs) as f64).unwrap()));
 }
 
-/// The same night sent as 5-minute codes gives the same totals, onset and
-/// segments as its 30-second codes.
+/// The same night sent as 5-minute codes gives the same totals, onset,
+/// wake-ups and segments as its 30-second codes, whatever Oura's latency.
 #[hegel::test]
 fn five_minute_and_30_second_stages_agree(tc: TestCase) {
     let codes = tc.draw(gs::from_regex(r"[1-4x]{1,80}"));
+    // Often a latency that isn't a whole number of 5-minute epochs.
+    let latency = tc.draw(hegel::one_of!(
+        gs::just(None),
+        gs::integers::<u32>().max_value(80 * 300).map(|s| Some(f64::from(s))),
+        finite().map(Some),
+    ));
     let coarse = json!({"bedtime_start": "2026-10-18T00:00:00Z", "sleep_phase_5_min": codes});
     let fine = json!({"bedtime_start": "2026-10-18T00:00:00Z", "sleep_phase_30_sec": codes.chars().flat_map(|c| std::iter::repeat_n(c, 10)).collect::<String>()});
     let (a, b) = (Hypnogram::from_doc(&coarse).unwrap(), Hypnogram::from_doc(&fine).unwrap());
     assert_eq!(stage_stats(&a), stage_stats(&b));
-    assert_eq!(events(&a, None), events(&b, None));
+    assert_eq!(events(&a, latency), events(&b, latency));
     assert_eq!(period_json(&coarse)["segments"], period_json(&fine)["segments"]);
 }
 
@@ -524,7 +597,7 @@ fn the_night_is_the_longest_confirmed_long_sleep(tc: TestCase) {
             candidates.iter().any(|c| c.asleep_secs() == best && (n.hrv_avg_ms, n.hr_lowest_bpm) == (c.metrics[0], c.metrics[1])),
             "the night is not the longest period of the right pool with its own numbers"
         );
-        assert_eq!(n.other_periods, live.len() - 1);
+        assert_eq!(n.other_periods, Some(live.len() - 1));
         assert_eq!(n.asleep_s, Some(best as f64));
     }
 }
@@ -547,18 +620,45 @@ fn ties_go_to_the_earlier_bedtime(tc: TestCase) {
     }
 }
 
-/// The order Oura returns periods in never changes the nights.
+/// A period with no readable bedtime never wins a tie against one with a
+/// bedtime.
+#[hegel::test]
+fn a_period_without_a_bedtime_never_wins_a_tie(tc: TestCase) {
+    let mut p = tc.draw(period());
+    p.kind = "long_sleep".into();
+    let known = p.doc();
+    let mut unknown = p.doc();
+    unknown["id"] = json!("zzzzzzzz");
+    unknown["bedtime_start"] = tc.draw(gs::sampled_from(&[Value::Null, json!("not a time"), json!(7)][..]));
+    let pair = if tc.draw(gs::booleans()) { [&known, &unknown] } else { [&unknown, &known] };
+    assert_eq!(oura::main_period(&pair).unwrap()["id"], known["id"]);
+}
+
+/// Daily score and readiness documents, sometimes two for the same day with
+/// different scores.
+#[hegel::composite]
+fn daily_docs(tc: &TestCase) -> Vec<Value> {
+    let n = tc.draw(gs::integers::<usize>().max_value(8));
+    (0..n)
+        .map(|_| {
+            let day = date(2026, 10, 12) + Duration::days(tc.draw(gs::integers::<i64>().min_value(0).max_value(9)));
+            let score = tc.draw(gs::sampled_from(&[60, 75, 90][..]));
+            json!({"id": tc.draw(gs::sampled_from(&["a", "b"][..])), "day": day.to_string(), "score": score, "temperature_deviation": score as f64 / 100.0})
+        })
+        .collect()
+}
+
+/// The order Oura returns periods and daily documents in never changes the
+/// nights, even when a day has two daily documents.
 #[hegel::test]
 fn api_order_never_changes_the_nights(tc: TestCase) {
     let ps = tc.draw(periods());
-    let mut docs: Vec<Value> = ps.iter().map(Period::doc).collect();
-    let days: Vec<NaiveDate> = ps.iter().map(|p| p.day).collect::<BTreeSet<_>>().into_iter().collect();
-    let before = oura::summarize(&docs, &[], &[], &days);
-    let order: Vec<usize> = tc.draw(gs::vecs(gs::integers::<usize>()).min_size(docs.len()).max_size(docs.len()));
-    let mut keyed: Vec<(usize, Value)> = order.into_iter().zip(docs.drain(..)).collect();
-    keyed.sort_by_key(|(k, _)| *k);
-    let shuffled: Vec<Value> = keyed.into_iter().map(|(_, doc)| doc).collect();
-    assert_eq!(oura::summarize(&shuffled, &[], &[], &days), before);
+    let docs: Vec<Value> = ps.iter().map(Period::doc).collect();
+    let (scores, readiness) = (tc.draw(daily_docs()), tc.draw(daily_docs()));
+    let days: Vec<NaiveDate> = ps.iter().map(|p| p.day).chain((0..10).map(|n| date(2026, 10, 12) + Duration::days(n))).collect::<BTreeSet<_>>().into_iter().collect();
+    let before = oura::summarize(&docs, &scores, &readiness, &days);
+    let (docs, scores, readiness) = (shuffle(&tc, &docs), shuffle(&tc, &scores), shuffle(&tc, &readiness));
+    assert_eq!(oura::summarize(&docs, &scores, &readiness, &days), before);
 }
 
 /// Deleted periods and rejected "rest" detections never become your night or
@@ -570,7 +670,7 @@ fn deleted_and_rejected_periods_never_count(tc: TestCase) {
     let mk = |id: &str, kind: &str, h: u32| json!({"id": id, "day": day.to_string(), "type": kind, "total_sleep_duration": h * 3600});
     let docs = vec![mk("main", "long_sleep", hours), mk("deleted", "deleted", hours + 5), mk("rejected", "rest", hours + 6)];
     let n = &oura::summarize(&docs, &[], &[], &[day])[&day];
-    assert_eq!((n.source_id.as_deref(), n.other_periods), (Some("main"), 0));
+    assert_eq!((n.source_id.as_deref(), n.other_periods), (Some("main"), Some(0)));
 }
 
 /// A period with no total sleep ranks below one with any total, even 0.
@@ -693,6 +793,29 @@ fn oura_date_bounds_never_change_a_lookup(tc: TestCase) {
     assert_eq!(show(views::select(collection, served, start, end)), show(views::select(collection, docs, start, end)));
 }
 
+/// The order Oura sends documents in never changes a listing, even when two
+/// share a day and start time.
+#[hegel::test]
+fn api_order_never_changes_a_listing(tc: TestCase) {
+    let collection = tc.draw(gs::sampled_from(&COLLECTIONS[..]));
+    let docs: Vec<Value> = tc.draw(gs::vecs(collection_docs(collection)).max_size(12));
+    let (start, end) = (tc.draw(days()), tc.draw(days()));
+    let show = |v: Vec<Value>| v.iter().map(Value::to_string).collect::<Vec<_>>();
+    assert_eq!(show(views::select(collection, shuffle(&tc, &docs), start, end)), show(views::select(collection, docs, start, end)));
+}
+
+/// A span whose `day` is null or not a date is listed exactly like one
+/// without a `day`.
+#[hegel::test]
+fn a_null_day_is_the_same_as_no_day(tc: TestCase) {
+    let collection = tc.draw(gs::sampled_from(&["rest_mode_period", "enhanced_tag"][..]));
+    let doc = tc.draw(collection_docs(collection));
+    let mut odd = doc.clone();
+    odd["day"] = tc.draw(gs::sampled_from(&[Value::Null, json!("someday"), json!(3)][..]));
+    let (start, end) = (tc.draw(days()), tc.draw(days()));
+    assert_eq!(views::in_range(collection, &odd, start, end), views::in_range(collection, &doc, start, end));
+}
+
 /// Documents are listed in the order they happened, by day and then by their
 /// own start time to the millisecond, whatever offset each is written in.
 #[hegel::test]
@@ -765,6 +888,24 @@ fn heart_rate_windows_run_midnight_to_midnight_locally(tc: TestCase) {
     assert_eq!((b.with_timezone(&ny()).date_naive(), b.with_timezone(&ny()).hour()), (end, 0));
 }
 
+/// A day's heart-rate window starts at its first local instant in every zone,
+/// including zones whose clocks skip midnight (Havana, Santiago, Beirut).
+#[hegel::test]
+fn every_day_has_a_first_instant_in_every_zone(tc: TestCase) {
+    let tz: Tz = tc.draw(hegel::one_of!(
+        gs::sampled_from(&ZONES[..]).map(zone),
+        gs::sampled_from(&chrono_tz::TZ_VARIANTS[..]),
+    ));
+    let day = tc.draw(hegel::one_of!(
+        gs::sampled_from(&[d("2026-03-08"), d("2026-09-06"), d("2026-03-29"), d("2026-10-04"), d("2026-11-01")][..]),
+        any_day(),
+    ));
+    let params: BTreeMap<String, String> = oura::window_params("heartrate", Some(day), Some(day + Duration::days(1)), tz).unwrap().into_iter().collect();
+    let first = ts(&params["start_datetime"]);
+    assert_eq!(first.with_timezone(&tz).date_naive(), day);
+    assert!((first - Duration::seconds(1)).with_timezone(&tz).date_naive() < day, "{first} is not the first instant of {day} in {tz}");
+}
+
 /// Daily collections ask Oura for the dates as given; undated ones for nothing.
 #[hegel::test]
 fn daily_windows_are_the_dates_given(tc: TestCase) {
@@ -792,13 +933,21 @@ fn any_login_code_survives_the_callback(tc: TestCase) {
     assert_eq!(oura::parse_callback(&format!("{}?{}", url.path(), url.query().unwrap()), &state), oura::Callback::Code(code));
 }
 
-/// Pasting the redirect URL, with or without "http://", gives the same code.
+/// Pasting the redirect URL gives the same code: the whole URL in any letter
+/// case, without "http://", just the path, or just the query.
 #[hegel::test]
 fn a_pasted_redirect_url_gives_the_same_code(tc: TestCase) {
     let code = tc.draw(gs::text().min_size(1));
     let state = tc.draw(gs::text().min_size(1));
     let url = reqwest::Url::parse_with_params("http://localhost:8765/callback", &[("code", code.as_str()), ("state", state.as_str())]).unwrap();
-    let pasted = if tc.draw(gs::booleans()) { url.to_string() } else { url.as_str().trim_start_matches("http://").to_string() };
+    let query = url.query().unwrap();
+    let pasted = match tc.draw(gs::integers::<u8>().max_value(4)) {
+        0 => url.to_string(),
+        1 => url.as_str().trim_start_matches("http://").to_string(),
+        2 => format!("{}?{query}", tc.draw(gs::sampled_from(&["HTTP://LOCALHOST:8765/callback", "Http://LocalHost:8765/callback", "LOCALHOST:8765/callback"][..]))),
+        3 => format!("/callback?{query}"),
+        _ => format!("?{query}"),
+    };
     assert_eq!(oura::parse_pasted(&pasted, &state), oura::Callback::Code(code));
 }
 
@@ -856,6 +1005,11 @@ fn pasting_something_else_is_never_accepted(tc: TestCase) {
             let state = state.clone();
             move |u: String| format!("{u}{state}")
         }),
+        // Another host or port without a scheme, with the right state.
+        gs::from_regex(r"(evil\.example|localhost\.evil\.example|localhost:9999|127\.0\.0\.1:8765)(/[a-z]{0,8})?\?a=1&code=x&state=").map({
+            let state = state.clone();
+            move |u: String| format!("{u}{state}")
+        }),
         gs::from_regex(r"[A-Za-z0-9]{1,30}"),
         gs::text(),
     ));
@@ -886,7 +1040,8 @@ fn missing_scopes_are_exactly_the_ungranted_ones(tc: TestCase) {
 }
 
 /// A token refresh that sends no new refresh token keeps the old one, so the
-/// login survives; an expiry never overflows, however absurd.
+/// login survives; an expiry is rounded up (so it is never already past) and
+/// never overflows, however absurd.
 #[hegel::test]
 fn token_refreshes_keep_the_login_and_expiries_never_overflow(tc: TestCase) {
     let now = tc.draw(gs::integers::<i64>().min_value(0).max_value(4_000_000_000));
@@ -894,7 +1049,7 @@ fn token_refreshes_keep_the_login_and_expiries_never_overflow(tc: TestCase) {
     let previous = oura::Tokens { access_token: "a0".into(), refresh_token: "r0".into(), expires_at: 0, scope: Some("daily".into()) };
     let t = oura::tokens_from_response(&json!({"access_token": "a1", "expires_in": expires}), now, Some(&previous)).unwrap();
     assert_eq!((t.refresh_token.as_str(), t.scope.as_deref()), ("r0", Some("daily")));
-    assert_eq!(t.expires_at, now.saturating_add(expires.min(10.0 * 365.0 * 86400.0) as i64));
+    assert_eq!(t.expires_at, now.saturating_add(expires.min(10.0 * 365.0 * 86400.0).ceil() as i64));
 }
 
 /// `oura configure`'s redirect check passes only when Oura's page goes on to
@@ -1035,8 +1190,52 @@ fn eight_order_never_changes_the_nights(tc: TestCase) {
     assert_eq!(eight::summarize(&json!({"days": days}), &wanted).unwrap(), before);
 }
 
-/// An Eight Sleep session expiry is used as given (capped at ten years);
-/// zero, negative or missing means one hour; nothing overflows.
+/// An Eight Sleep night is "still processing" when either `processing` or
+/// `incomplete` says so, and unknown when neither is a true/false value.
+#[hegel::test]
+fn either_eight_flag_marks_a_night_as_processing(tc: TestCase) {
+    let flags = [None, Some(json!(true)), Some(json!(false)), Some(Value::Null), Some(json!("true"))];
+    let (processing, incomplete) = (tc.draw(gs::sampled_from(&flags[..])), tc.draw(gs::sampled_from(&flags[..])));
+    let mut day = json!({"day": "2026-10-18"});
+    for (key, v) in [("processing", &processing), ("incomplete", &incomplete)] {
+        if let Some(v) = v {
+            day[key] = v.clone();
+        }
+    }
+    let b = |v: &Option<Value>| v.as_ref().and_then(Value::as_bool);
+    let want = match (b(&processing), b(&incomplete)) {
+        (None, None) => None,
+        (p, i) => Some(p == Some(true) || i == Some(true)),
+    };
+    assert_eq!(eight_night(day).processing, want);
+}
+
+/// Eight Sleep temperatures and lowest heart rate are never infinite, even
+/// when samples are large enough to overflow a sum.
+#[hegel::test]
+fn eight_sample_metrics_are_never_infinite(tc: TestCase) {
+    let samples: Vec<f64> = tc.draw(gs::vecs(hegel::one_of!(gs::just(f64::MAX), gs::just(1e308), finite())).min_size(1).max_size(5));
+    let series: Vec<Value> = samples.iter().map(|v| json!(["2026-10-18T04:00:00.000Z", v])).collect();
+    let day = json!({"day": "2026-10-18", "mainSessionId": "m", "sessions": [{"id": "m", "timeseries": {"heartRate": series, "tempBedC": series, "tempRoomC": series}}]});
+    let n = eight_night(day);
+    for v in [n.bed_temp_c, n.room_temp_c, n.hr_lowest_bpm] {
+        assert!(v.is_none_or(f64::is_finite), "{v:?}");
+    }
+}
+
+/// Eight Sleep reports one night a day, so how many other periods it had is
+/// unknown, never zero.
+#[hegel::test]
+fn eight_never_claims_a_count_of_other_periods(tc: TestCase) {
+    let day = tc.draw(eight_days());
+    let wanted: Vec<NaiveDate> = views::doc_day(&day).into_iter().collect();
+    for n in eight::summarize(&json!({"days": [day]}), &wanted).unwrap().values() {
+        assert_eq!(n.other_periods, None);
+    }
+}
+
+/// An Eight Sleep session expiry is used as given, rounded up and capped at
+/// ten years; zero, negative or missing means one hour; nothing overflows.
 #[hegel::test]
 fn eight_session_expiry_is_bounded(tc: TestCase) {
     let now = tc.draw(gs::integers::<i64>().min_value(0).max_value(4_000_000_000));
@@ -1047,7 +1246,7 @@ fn eight_session_expiry_is_bounded(tc: TestCase) {
     }
     let s = eight::session_from_response(&v, "a@b.c", now).unwrap();
     let want = match expires {
-        Some(e) if e > 0.0 => now.saturating_add(e.min(10.0 * 365.0 * 86400.0) as i64),
+        Some(e) if e > 0.0 => now.saturating_add(e.min(10.0 * 365.0 * 86400.0).ceil() as i64),
         _ => now + 3600,
     };
     assert_eq!(s.expires_at, want);
@@ -1090,6 +1289,25 @@ fn each_source_shows_times_its_own_way(tc: TestCase) {
     let own = format!("{} → {}", t.format("%H:%M"), (t + Duration::hours(1)).format("%H:%M"));
     let home = format!("{} → {}", t.with_timezone(&ny()).format("%H:%M"), (t + Duration::hours(1)).with_timezone(&ny()).format("%H:%M"));
     assert!(line.starts_with(&own) && line.ends_with(&home), "{line}");
+}
+
+/// Every Oura clock time shown is in the display zone's offset or labelled
+/// with its own, including nights that start in one offset and end in another.
+#[hegel::test]
+fn every_shown_time_is_home_time_or_labelled(tc: TestCase) {
+    let p = tc.draw(period());
+    let tz = zone(tc.draw(gs::sampled_from(&ZONES[..])));
+    let (start, end) = (p.start, p.end());
+    let out = night::local_span(Some(&start), Some(&end), tz, " → ").unwrap();
+    let away = |t: &DateTime<FixedOffset>| *t.offset() != t.with_timezone(&tz).offset().fix();
+    for t in [start, end] {
+        if away(&t) {
+            assert!(out.contains(&format!("({})", t.format("%:z"))), "{t} unlabelled in {out:?} ({tz})");
+        }
+    }
+    if !away(&start) && !away(&end) {
+        assert!(!out.contains('('), "{out:?}");
+    }
 }
 
 /// The single-day view shows every field Oura sent (except its id), so data
@@ -1135,7 +1353,7 @@ fn thousands_separators_read_back_as_the_number(tc: TestCase) {
 fn tables_have_one_row_per_document(tc: TestCase) {
     let view = views::view(tc.draw(gs::sampled_from(&["readiness", "sleep", "activity", "stress", "workouts", "tags"][..]))).unwrap();
     let docs: Vec<Value> = tc.draw(gs::vecs(hegel::extras::serde_json::values()).max_size(10));
-    assert_eq!(views::render_table(&view, &docs).lines().count(), docs.len() + 1);
+    assert_eq!(views::render_table(&view, &docs, ny()).lines().count(), docs.len() + 1);
 }
 
 /// The one-day dashboard never says "none" or "off" for data it couldn't fetch.
@@ -1181,7 +1399,8 @@ fn the_week_table_has_a_row_per_day_per_readable_source(tc: TestCase) {
 #[hegel::test]
 fn the_heart_rate_table_has_a_row_per_bucket(tc: TestCase) {
     let samples: Vec<Value> = tc.draw(gs::vecs(hr_samples()).max_size(60));
-    let buckets = views::hr_buckets(&samples, ny(), true);
+    let tz = zone(tc.draw(gs::sampled_from(&ZONES[..])));
+    let buckets = views::hr_buckets(&samples, tz, true);
     let out = views::render_hr(&buckets);
     assert_eq!(out.lines().count(), buckets.len() + 1);
     let mut seen: BTreeMap<(NaiveDate, u32), usize> = BTreeMap::new();
@@ -1207,13 +1426,15 @@ fn the_heart_rate_table_has_a_row_per_bucket(tc: TestCase) {
 fn heart_rate_buckets_count_every_sample_once(tc: TestCase) {
     let samples: Vec<Value> = tc.draw(gs::vecs(hr_samples()).max_size(80));
     let by_hour = tc.draw(gs::booleans());
-    let got = views::hr_buckets(&samples, ny(), by_hour);
+    let tz = zone(tc.draw(gs::sampled_from(&ZONES[..])));
+    let got = views::hr_buckets(&samples, tz, by_hour);
     type Bucket = (usize, f64, f64, f64, BTreeMap<String, usize>);
     let mut model: BTreeMap<views::HrKey, Bucket> = BTreeMap::new();
     for s in &samples {
         let Some(bpm) = s["bpm"].as_f64() else { continue };
-        let t = ts(s["timestamp"].as_str().unwrap()).with_timezone(&ny());
-        let hour = by_hour.then(|| (t - Duration::seconds(i64::from(t.minute() * 60 + t.second())) - Duration::nanoseconds(i64::from(t.nanosecond()))).fixed_offset());
+        let t = ts(s["timestamp"].as_str().unwrap()).with_timezone(&tz);
+        // The local clock hour, in the offset the sample was taken in.
+        let hour = by_hour.then(|| t.date_naive().and_hms_opt(t.hour(), 0, 0).unwrap().and_local_timezone(t.offset().fix()).unwrap());
         let e = model.entry((t.date_naive(), hour)).or_insert((0, f64::INFINITY, f64::NEG_INFINITY, 0.0, BTreeMap::new()));
         e.0 += 1;
         e.1 = e.1.min(bpm);
@@ -1226,6 +1447,31 @@ fn heart_rate_buckets_count_every_sample_once(tc: TestCase) {
         let s = &got[&key];
         assert_eq!((s.samples, s.min, s.max, &s.by_source), (count, min, max, &sources));
         assert!((s.avg().unwrap() - sum / count as f64).abs() < 1e-9);
+    }
+}
+
+/// Every heart-rate hour starts on the hour where it happened (minute 0 in
+/// its own offset), even where clocks change by 30 minutes.
+#[hegel::test]
+fn heart_rate_hours_start_on_the_hour(tc: TestCase) {
+    let samples: Vec<Value> = tc.draw(gs::vecs(hr_samples()).max_size(60));
+    let tz = zone(tc.draw(gs::sampled_from(&ZONES[..])));
+    for (day, hour) in views::hr_buckets(&samples, tz, true).keys() {
+        let h = hour.unwrap();
+        assert_eq!((h.minute(), h.second(), h.nanosecond(), h.date_naive()), (0, 0, 0, *day), "{h}");
+    }
+}
+
+/// Heart-rate averages are never infinite and never outside the hour's
+/// minimum and maximum.
+#[hegel::test]
+fn heart_rate_averages_stay_between_min_and_max(tc: TestCase) {
+    let bpms: Vec<f64> = tc.draw(gs::vecs(hegel::one_of!(gs::just(f64::MAX), gs::just(0.1), finite())).min_size(1).max_size(6));
+    let samples: Vec<Value> = bpms.iter().map(|b| json!({"bpm": b, "source": "rest", "timestamp": "2026-10-18T04:00:00+00:00"})).collect();
+    for s in views::hr_buckets(&samples, ny(), false).values() {
+        if let Some(a) = s.avg() {
+            assert!(a.is_finite() && s.min <= a && a <= s.max, "{a} outside {}..{}", s.min, s.max);
+        }
     }
 }
 
@@ -1259,6 +1505,21 @@ fn logged_urls(tc: &TestCase) -> (reqwest::Url, Vec<String>, Vec<(String, String
     pairs.extend(plain.iter().map(|(k, v)| (k.to_string(), v.clone())));
     let url = reqwest::Url::parse_with_params("https://api.ouraring.com/v2/usercollection/sleep", &pairs).unwrap();
     (url, secrets.into_iter().map(|(_, v)| v).collect(), plain.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
+}
+
+/// Secrets never reach the log when their parameter name is in another letter
+/// case or they sit in the URL's fragment.
+#[hegel::test]
+fn secrets_in_any_case_or_fragment_never_reach_the_log(tc: TestCase) {
+    let (mut url, _, _) = tc.draw(logged_urls());
+    let upper = tc.draw(gs::booleans());
+    let pairs: Vec<(String, String)> = url.query_pairs().map(|(k, v)| (if upper { k.to_uppercase() } else { k.into_owned() }, v.into_owned())).collect();
+    url.query_pairs_mut().clear().extend_pairs(pairs);
+    if tc.draw(gs::booleans()) {
+        url.set_fragment(Some(&format!("access_token=SeCrEt{}", tc.draw(gs::text()))));
+    }
+    let logged = log::redact_url(&url);
+    assert!(!logged.contains("SeCrEt"), "{logged}");
 }
 
 /// No login code, state, client id or secret, token or password reaches the
@@ -1324,6 +1585,25 @@ fn server_error_messages_are_short_and_single_line(tc: TestCase) {
     }
 }
 
+/// A blank error field never hides a message in a later field: somno shows
+/// the first field that has text.
+#[hegel::test]
+fn a_blank_error_field_never_hides_the_message(tc: TestCase) {
+    const KEYS: [&str; 4] = ["error_description", "message", "detail", "error"];
+    let values: Vec<Option<String>> = (0..4).map(|_| tc.draw(gs::optional(hegel::one_of!(gs::just(String::new()), gs::just("  ".to_string()), gs::text())))).collect();
+    let mut body = json!({});
+    for (k, v) in KEYS.iter().zip(&values) {
+        if let Some(v) = v {
+            body[*k] = json!(v);
+        }
+    }
+    let shown = |v: &String| -> Option<String> {
+        let clean: String = v.chars().filter(|c| !c.is_control()).take(160).collect();
+        (!clean.trim().is_empty()).then_some(clean)
+    };
+    assert_eq!(http::short_message(body.to_string().as_bytes()), values.iter().flatten().find_map(shown));
+}
+
 // ---------------------------------------------------------------------------
 // Robustness: whatever the providers send
 // ---------------------------------------------------------------------------
@@ -1361,7 +1641,7 @@ fn a_corrupted_sleep_record_never_crashes_a_view(tc: TestCase) {
     let _ = somno::stages::render_period(&doc, width, true);
     let _ = period_json(&doc);
     let _ = views::render_detail(&[], &doc, ny());
-    let _ = views::render_table(&views::view("sleep").unwrap(), std::slice::from_ref(&doc));
+    let _ = views::render_table(&views::view("sleep").unwrap(), std::slice::from_ref(&doc), ny());
     let _ = views::render_day(day, ny(), &BTreeMap::from([("sleep".to_string(), vec![doc.clone()])]), &BTreeMap::new());
 }
 
