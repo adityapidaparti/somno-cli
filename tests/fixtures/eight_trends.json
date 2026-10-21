@@ -1,0 +1,30 @@
+{
+  "_comment": "Synthetic numbers in the shape of a real trends response (checked 2026-10-21). 2026-10-18 has a main session with stageSummary, current-vs-average scores and sample series; a second, shorter session must not be picked. 2026-10-19 is an older day-level-only shape with \"None\" strings.",
+  "days": [
+    {"day": "2026-10-18", "score": 85, "tnt": 24, "incomplete": false, "mainSessionId": "s-main",
+     "presenceStart": "2026-10-18T03:38:00.000Z", "presenceEnd": "2026-10-18T11:15:00.000Z",
+     "presenceDuration": 27420, "sleepDuration": 24000, "lightDuration": 14400, "deepDuration": 3900, "remDuration": 5700,
+     "sleepQualityScore": {"total": 88,
+        "hrv": {"current": 58, "average": 70},
+        "respiratoryRate": {"current": 14.2, "average": 15.0},
+        "heartRate": {"current": 55.4, "average": 51.0}},
+     "sleepRoutineScore": {"latencyAsleepSeconds": {"current": 600, "average": 900}},
+     "sessions": [
+       {"id": "s-nap", "stageSummary": {"sleepDuration": 1200, "awakeDuration": 300, "outDuration": 0, "totalDuration": 1500},
+        "timeseries": {"heartRate": [["2026-10-18T19:00:00.000Z", 40]]}},
+       {"id": "s-main",
+        "stageSummary": {"totalDuration": 27420, "sleepDuration": 24000, "deepDuration": 3900, "remDuration": 5700, "lightDuration": 14400,
+                         "awakeDuration": 2400, "outDuration": 1020, "awakeBeforeSleepDuration": 600, "awakeBetweenSleepDuration": 1800, "awakeAfterSleepDuration": 0},
+        "timeseries": {"heartRate": [["2026-10-18T03:40:00.000Z", 60], ["2026-10-18T04:40:00.000Z", 49], ["2026-10-18T05:40:00.000Z", "None"]],
+                       "tempBedC": [["2026-10-18T03:00:00.000Z", 30.0], ["2026-10-18T04:00:00.000Z", 32.0]],
+                       "tempRoomC": [["2026-10-18T03:00:00.000Z", 20.0], ["2026-10-18T04:00:00.000Z", 21.0]]}}
+     ]},
+    {"day": "2026-10-19", "score": "None", "processing": true,
+     "presenceStart": "2026-10-19T03:00:00.000Z", "presenceEnd": "None",
+     "presenceDuration": 20000, "sleepDuration": "None",
+     "heartRate": 57.0, "respiratoryRate": 15.1, "latencyAsleepSeconds": 900,
+     "sleepFitnessScore": {"total": 77},
+     "sleepQualityScore": {"hrv": {"average": 49}}},
+    {"day": "2026-10-25", "score": 60, "sleepDuration": 20000}
+  ]
+}

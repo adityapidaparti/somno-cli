@@ -1,0 +1,32 @@
+{
+  "_comment": "Synthetic. Field names from Oura OpenAPI 1.42 PublicModifiedSleepModel.",
+  "data": [
+    {"id": "s-oct18-main", "day": "2026-10-18", "type": "long_sleep",
+     "bedtime_start": "2026-10-17T23:41:00-04:00", "bedtime_end": "2026-10-18T07:12:00-04:00",
+     "time_in_bed": 27060, "total_sleep_duration": 24720, "deep_sleep_duration": 4200,
+     "rem_sleep_duration": 5700, "light_sleep_duration": 14820, "awake_time": 2340,
+     "latency": 720, "efficiency": 91, "average_heart_rate": 54.25, "lowest_heart_rate": 48,
+     "average_hrv": 62, "average_breath": 14.625, "restless_periods": 18, "period": 0,
+     "low_battery_alert": false},
+    {"id": "s-oct18-nap", "day": "2026-10-18", "type": "late_nap",
+     "bedtime_start": "2026-10-18T15:00:00-04:00", "bedtime_end": "2026-10-18T15:40:00-04:00",
+     "time_in_bed": 2400, "total_sleep_duration": 1800, "period": 1, "low_battery_alert": false},
+    {"id": "s-oct19-short", "day": "2026-10-19", "type": "long_sleep",
+     "bedtime_start": "2026-10-18T22:30:00-04:00", "bedtime_end": "2026-10-19T01:30:00-04:00",
+     "time_in_bed": 10800, "total_sleep_duration": 9000, "period": 0, "low_battery_alert": false},
+    {"id": "s-oct19-long", "day": "2026-10-19", "type": "long_sleep",
+     "bedtime_start": "2026-10-19T02:10:00-04:00", "bedtime_end": "2026-10-19T08:00:00-04:00",
+     "time_in_bed": 21000, "total_sleep_duration": 19000, "average_hrv": null, "period": 1,
+     "low_battery_alert": false},
+    {"id": "s-oct19-deleted", "day": "2026-10-19", "type": "deleted",
+     "bedtime_start": "2026-10-19T09:00:00-04:00", "bedtime_end": "2026-10-19T12:00:00-04:00",
+     "time_in_bed": 10800, "total_sleep_duration": 99999, "period": 2, "low_battery_alert": false},
+    {"id": "s-oct20-nap-only", "day": "2026-10-20", "type": "sleep",
+     "bedtime_start": "2026-10-20T03:00:00-04:00", "bedtime_end": "2026-10-20T05:00:00-04:00",
+     "time_in_bed": 7200, "total_sleep_duration": 6000, "period": 0, "low_battery_alert": false},
+    {"id": "s-outside", "day": "2026-10-10", "type": "long_sleep",
+     "bedtime_start": "2026-10-09T23:00:00-04:00", "bedtime_end": "2026-10-10T07:00:00-04:00",
+     "time_in_bed": 28800, "total_sleep_duration": 25000, "period": 0, "low_battery_alert": false}
+  ],
+  "next_token": null
+}

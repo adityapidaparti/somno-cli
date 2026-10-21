@@ -1,0 +1,4 @@
+{"data": [
+  {"id": "dr-18", "day": "2026-10-18", "score": 79, "temperature_deviation": 0.12, "temperature_trend_deviation": 0.05, "contributors": {}, "timestamp": "2026-10-18T00:00:00+00:00"},
+  {"id": "dr-21", "day": "2026-10-21", "score": 65, "temperature_deviation": -0.3, "contributors": {}, "timestamp": "2026-10-21T00:00:00+00:00"}
+], "next_token": null}
