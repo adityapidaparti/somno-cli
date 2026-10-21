@@ -18,7 +18,7 @@ directories = "6"
 rpassword = "7"
 
 [dev-dependencies]
-proptest = "1"
+hegeltest = { version = "0.50.3", features = ["chrono", "serde_json"] }
 url = "2"
 
 [profile.release]

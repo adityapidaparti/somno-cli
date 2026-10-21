@@ -714,20 +714,36 @@ pub fn query_window(collection: &str, start: NaiveDate, end: NaiveDate) -> (Naiv
     (start - Duration::days(back), end + Duration::days(1))
 }
 
+/// The first document for each day (Oura sends one daily document per day).
+fn first_by_day(docs: &[Value]) -> BTreeMap<NaiveDate, &Value> {
+    let mut map: BTreeMap<NaiveDate, &Value> = BTreeMap::new();
+    for d in docs {
+        if let Some(day) = day_of(d) {
+            map.entry(day).or_insert(d);
+        }
+    }
+    map
+}
+
 /// Per-day summary. The main period is the longest `long_sleep`; when a day has
 /// none, the longest other confirmed period (not deleted, not rejected `rest`).
 /// Scores come from the daily docs.
 pub fn summarize(sleep: &[Value], daily_sleep: &[Value], readiness: &[Value], days: &[NaiveDate]) -> BTreeMap<NaiveDate, Night> {
-    let by_day = |docs: &[Value], day: NaiveDate| docs.iter().find(|d| day_of(d) == Some(day)).cloned();
+    // Index each collection by day once (linear), instead of scanning every
+    // document for every day: a year of nights stays fast.
+    let mut periods_by_day: BTreeMap<NaiveDate, Vec<&Value>> = BTreeMap::new();
+    for d in sleep.iter().filter(|d| is_confirmed_sleep(d)) {
+        if let Some(day) = day_of(d) {
+            periods_by_day.entry(day).or_default().push(d);
+        }
+    }
+    let (scores, readies) = (first_by_day(daily_sleep), first_by_day(readiness));
     let mut out = BTreeMap::new();
     for &day in days {
-        let periods: Vec<&Value> = sleep
-            .iter()
-            .filter(|d| day_of(d) == Some(day) && is_confirmed_sleep(d))
-            .collect();
-        let main = main_period(&periods);
-        let score = by_day(daily_sleep, day);
-        let ready = by_day(readiness, day);
+        let periods: &[&Value] = periods_by_day.get(&day).map(Vec::as_slice).unwrap_or(&[]);
+        let main = main_period(periods);
+        let score = scores.get(&day).copied();
+        let ready = readies.get(&day).copied();
         if main.is_none() && score.is_none() && ready.is_none() {
             continue;
         }

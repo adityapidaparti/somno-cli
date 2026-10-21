@@ -1,0 +1,9 @@
+# Hegel settings for `cargo test` (see https://docs.rs/hegeltest, "Settings profiles").
+# Thousands of cases per property reach the rare paths. Override for one run
+# with HEGEL_TEST_CASES=20000; see what was generated with HEGEL_STATISTICS=1.
+
+[profiles.development]
+test_cases = 2000
+
+[profiles.ci]
+test_cases = 5000

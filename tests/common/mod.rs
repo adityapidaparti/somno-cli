@@ -1,59 +1,70 @@
-//! Generators shared by the property tests.
+//! Hegel generators shared by the property tests.
 //!
-//! Correct by construction: each generator first builds a small model of the
-//! truth (a night as runs of sleep stages, a set of sleep periods, a set of
-//! dated documents) and derives the provider JSON from it. Properties then
-//! compare what the code computes with what the model says.
-//!
-//! Values come from small domains on purpose, so the cases that hide bugs
-//! happen often: two periods with the same length on the same day, runs right
-//! at the 5-minute threshold, bedtimes either side of midnight, DST switch
-//! days, and nights that start in one UTC offset and end in another.
+//! Each generator builds a small model of the truth first (a night as runs
+//! of sleep stages, a set of sleep periods across days) and derives the
+//! provider JSON from it, so a property can compare what somno computes with
+//! what the model says. Domains are as wide as the data can be (any UTC
+//! offset, any latency, any finite metric); targeted subsets that matter
+//! (tied periods, runs around the 5-minute mark, nights that change timezone)
+//! are constructed directly rather than hoped for.
 
 #![allow(dead_code)]
 
 use chrono::{DateTime, Duration, FixedOffset, NaiveDate, TimeZone};
-use proptest::prelude::*;
+use hegel::extras::chrono as cgs;
+use hegel::prelude::*;
 use serde_json::{json, Value};
 
 pub fn date(y: i32, m: u32, d: u32) -> NaiveDate {
     NaiveDate::from_ymd_opt(y, m, d).unwrap()
 }
 
-/// Mostly a ten-day window, so documents share days; sometimes a DST switch
-/// day (US) or a year boundary.
-pub fn arb_day() -> impl Strategy<Value = NaiveDate> {
-    prop_oneof![
-        5 => (0i64..10).prop_map(|n| date(2026, 10, 12) + Duration::days(n)),
-        1 => prop::sample::select(vec![date(2026, 3, 8), date(2026, 11, 1), date(2026, 12, 31), date(2027, 1, 1)]),
-    ]
+/// Any day in the years Oura and Eight Sleep can have data for.
+pub fn any_day() -> cgs::NaiveDateGenerator {
+    cgs::naive_dates().min_value(date(2000, 1, 1)).max_value(date(2100, 12, 31))
 }
 
-/// Mostly the owner's zones (US Eastern summer/winter, UTC, Central Europe
-/// winter/summer); sometimes any quarter hour from -12:00 to +14:00.
-pub fn arb_offset() -> impl Strategy<Value = FixedOffset> {
-    prop_oneof![
-        3 => prop::sample::select(vec![-4 * 3600, -5 * 3600, 0, 3600, 2 * 3600]),
-        1 => (-48i32..=56).prop_map(|q| q * 900),
-    ]
-    .prop_map(|secs| FixedOffset::east_opt(secs).unwrap())
+/// A day from a ten-day window (so documents share days and ranges overlap
+/// them), a DST switch or year boundary, or any day.
+#[hegel::composite]
+pub fn days(tc: &TestCase) -> NaiveDate {
+    tc.draw(hegel::one_of!(
+        gs::integers::<i64>().min_value(0).max_value(9).map(|n| date(2026, 10, 12) + Duration::days(n)),
+        gs::sampled_from(&[date(2026, 3, 8), date(2026, 11, 1), date(2026, 12, 31), date(2027, 1, 1)][..]),
+        any_day(),
+    ))
+}
+
+/// The owner's zones (US Eastern summer/winter, UTC, Central Europe), or any
+/// offset an RFC 3339 timestamp can carry: whole minutes within a day
+/// (the format has no seconds field for offsets).
+#[hegel::composite]
+pub fn offsets(tc: &TestCase) -> FixedOffset {
+    tc.draw(hegel::one_of!(
+        gs::sampled_from(&[-4 * 3600, -5 * 3600, 0, 3600, 2 * 3600][..]).map(|s: i32| FixedOffset::east_opt(s).unwrap()),
+        cgs::fixed_offsets().map(|o: FixedOffset| FixedOffset::east_opt(o.local_minus_utc() / 60 * 60).unwrap()),
+    ))
 }
 
 /// Oura stage codes: deep, light, REM, awake.
 pub const CODES: [char; 4] = ['1', '2', '3', '4'];
 
-/// A night as runs of (stage code, 30-second epochs). Most runs are 1–12
-/// epochs, around the 10-epoch (5-minute) stretch threshold; some are long.
-/// Adjacent runs may repeat a stage, so the model must merge them too.
-pub fn arb_runs() -> impl Strategy<Value = Vec<(char, usize)>> {
-    let len = prop_oneof![4 => 1usize..=12, 1 => 1usize..=240];
-    prop::collection::vec((prop::sample::select(CODES.to_vec()), len), 0..30)
-}
-
-/// Optional metric from a small domain, so values tie across periods; `None`
-/// becomes JSON null.
-fn arb_metric() -> impl Strategy<Value = Option<f64>> {
-    prop::option::weighted(0.8, prop::sample::select(vec![40.0, 52.0, 52.5, 60.0, 75.0, 91.0]))
+/// A night as runs of (stage code, 30-second epochs). Lengths cluster around
+/// the 10-epoch (5-minute) stretch threshold, with long runs too. Adjacent
+/// runs may repeat a stage, so the decoder must merge them.
+#[hegel::composite]
+pub fn stage_runs(tc: &TestCase) -> Vec<(char, usize)> {
+    let count = tc.draw(gs::integers::<usize>().max_value(30));
+    (0..count)
+        .map(|_| {
+            let code = tc.draw(gs::sampled_from(&CODES[..]));
+            let len = tc.draw(hegel::one_of!(
+                gs::integers::<usize>().min_value(1).max_value(12),
+                gs::integers::<usize>().min_value(1).max_value(1200),
+            ));
+            (code, len)
+        })
+        .collect()
 }
 
 /// One Oura sleep period, with its model.
@@ -61,11 +72,12 @@ fn arb_metric() -> impl Strategy<Value = Option<f64>> {
 pub struct Period {
     pub id: String,
     pub day: NaiveDate,
-    pub kind: &'static str,
+    pub kind: String,
     pub start: DateTime<FixedOffset>,
     pub runs: Vec<(char, usize)>,
     pub movement: Vec<char>,
-    pub latency_epochs: Option<usize>,
+    /// Oura's latency in seconds; any finite value, including nonsense.
+    pub latency: Option<f64>,
     /// Offset the period ends in (differs after travel or a DST switch).
     pub end_offset: FixedOffset,
     pub metrics: [Option<f64>; 6],
@@ -73,6 +85,8 @@ pub struct Period {
 
 pub const METRIC_FIELDS: [&str; 6] =
     ["average_hrv", "lowest_heart_rate", "average_heart_rate", "average_breath", "efficiency", "restless_periods"];
+
+pub const KINDS: [&str; 5] = ["long_sleep", "sleep", "late_nap", "rest", "deleted"];
 
 impl Period {
     pub fn codes(&self) -> String {
@@ -95,6 +109,11 @@ impl Period {
         (self.start + Duration::seconds(self.epochs() as i64 * 30)).with_timezone(&self.end_offset)
     }
 
+    /// Whether Oura counts this period as sleep (not deleted, not a rejected `rest`).
+    pub fn confirmed(&self) -> bool {
+        !matches!(self.kind.as_str(), "deleted" | "rest")
+    }
+
     /// The Oura document, consistent with the model.
     pub fn doc(&self) -> Value {
         let mut doc = json!({
@@ -109,7 +128,7 @@ impl Period {
             "light_sleep_duration": self.secs('2'),
             "rem_sleep_duration": self.secs('3'),
             "awake_time": self.secs('4'),
-            "latency": self.latency_epochs.map(|e| e * 30),
+            "latency": self.latency,
             "sleep_phase_30_sec": self.codes(),
             "movement_30_sec": self.movement.iter().collect::<String>(),
         });
@@ -120,131 +139,139 @@ impl Period {
     }
 }
 
-pub fn arb_period() -> impl Strategy<Value = Period> {
-    let kind = prop::sample::select(vec!["long_sleep", "long_sleep", "long_sleep", "sleep", "late_nap", "rest", "deleted"]);
-    (
-        arb_day(),
-        kind,
-        0i64..(16 * 60),
-        arb_offset(),
-        prop::option::weighted(0.15, arb_offset()),
-        arb_runs(),
-        prop::option::of(0usize..=40),
-        "[a-f0-9]{8}",
-        [arb_metric(), arb_metric(), arb_metric(), arb_metric(), arb_metric(), arb_metric()],
-        prop_oneof![3 => Just(0i64), 1 => 0i64..1000],
-    )
-        .prop_flat_map(|(day, kind, minutes, offset, travel, runs, latency, id, metrics, millis)| {
-            let epochs: usize = runs.iter().map(|(_, n)| n).sum();
-            let movement = prop::collection::vec(prop::sample::select(CODES.to_vec()), epochs);
-            (Just((day, kind, minutes, offset, travel, runs, latency, id, metrics, millis)), movement)
-        })
-        .prop_map(|((day, kind, minutes, offset, travel, runs, latency, id, metrics, millis), movement)| {
-            // Bedtime between 18:00 the evening before and 10:00 on the day,
-            // sometimes with sub-second precision (Oura sends milliseconds).
-            let local = day.pred_opt().unwrap().and_hms_opt(18, 0, 0).unwrap() + Duration::minutes(minutes);
-            Period {
-                id,
-                day,
-                kind,
-                start: offset.from_local_datetime(&local).unwrap() + Duration::milliseconds(millis),
-                runs,
-                movement,
-                latency_epochs: latency,
-                end_offset: travel.unwrap_or(offset),
-                metrics,
-            }
-        })
+/// Any finite number a provider could send.
+pub fn finite() -> gs::FloatGenerator<f64> {
+    gs::floats::<f64>().allow_nan(false).allow_infinity(false)
 }
 
-/// Several periods; often one is duplicated under another id, so two periods
-/// tie exactly (same day, type, length and times).
-pub fn arb_periods() -> impl Strategy<Value = Vec<Period>> {
-    (prop::collection::vec(arb_period(), 0..8), any::<prop::sample::Index>(), prop::bool::weighted(0.35), "[g-z]{8}").prop_map(
-        |(mut periods, which, duplicate, id)| {
-            if duplicate && !periods.is_empty() {
-                let mut copy = periods[which.index(periods.len())].clone();
-                copy.id = id;
-                periods.push(copy);
-            }
-            periods
-        },
-    )
+#[hegel::composite]
+pub fn period(tc: &TestCase) -> Period {
+    let day = tc.draw(days());
+    let kind = tc.draw(gs::sampled_from(&KINDS[..])).to_string();
+    // Bedtime between 18:00 the evening before and 10:00 on the day, at any
+    // millisecond; sometimes starting in one offset and ending in another.
+    let minutes = tc.draw(gs::integers::<i64>().min_value(0).max_value(16 * 60));
+    let millis = tc.draw(hegel::one_of!(gs::just(0i64), gs::integers::<i64>().min_value(0).max_value(999)));
+    let offset = tc.draw(offsets());
+    let end_offset = if tc.draw(gs::weighted_booleans(0.2)) { tc.draw(offsets()) } else { offset };
+    let runs = tc.draw(stage_runs());
+    let epochs: usize = runs.iter().map(|(_, n)| n).sum();
+    let movement = tc.draw(gs::vecs(gs::sampled_from(&CODES[..])).min_size(epochs).max_size(epochs));
+    // Latency: usually within the night in whole epochs, sometimes any finite
+    // number (negative, fractional, absurd), sometimes missing.
+    let latency = tc.draw(hegel::one_of!(
+        gs::just(None),
+        gs::integers::<u32>().max_value(60).map(|e| Some(f64::from(e) * 30.0)),
+        finite().map(Some),
+    ));
+    let metrics = [(); 6].map(|_| tc.draw(gs::optional(hegel::one_of!(gs::sampled_from(&[40.0, 52.0, 60.0, 75.0][..]), finite()))));
+    let local = day.pred_opt().unwrap().and_hms_opt(18, 0, 0).unwrap() + Duration::minutes(minutes);
+    Period {
+        id: tc.draw(gs::from_regex(r"[a-f0-9]{8}")),
+        day,
+        kind,
+        start: offset.from_local_datetime(&local).unwrap() + Duration::milliseconds(millis),
+        runs,
+        movement,
+        latency,
+        end_offset,
+        metrics,
+    }
+}
+
+/// Several periods. Often one is duplicated under another id, so two
+/// periods tie exactly (same day, type, length and times): ties are where
+/// the nightly pick could depend on API order.
+#[hegel::composite]
+pub fn periods(tc: &TestCase) -> Vec<Period> {
+    let mut ps: Vec<Period> = tc.draw(gs::vecs(period()).max_size(8));
+    if !ps.is_empty() && tc.draw(gs::weighted_booleans(0.35)) {
+        let which = tc.draw(gs::integers::<usize>().max_value(ps.len() - 1));
+        let mut copy = ps[which].clone();
+        copy.id = tc.draw(gs::from_regex(r"[g-z]{8}"));
+        tc.event("a period is duplicated under another id");
+        ps.push(copy);
+    }
+    ps
 }
 
 /// A document of `collection` as Oura shapes it: day documents carry `day`;
 /// rest-mode periods and enhanced tags carry `start_day` and an optional
-/// `end_day`. Ids repeat sometimes, so duplicates occur.
-pub fn arb_collection_doc(collection: &'static str) -> BoxedStrategy<Value> {
-    let id = prop::sample::select(vec!["a", "b", "c", "d", "e", "f", "g", "h"]);
-    if matches!(collection, "rest_mode_period" | "enhanced_tag") {
-        (arb_day(), prop::option::weighted(0.6, 0i64..40), id)
-            .prop_map(|(d, len, id)| json!({"id": id, "start_day": d.to_string(), "end_day": len.map(|l| (d + Duration::days(l)).to_string())}))
-            .boxed()
+/// `end_day`. Ids repeat, so duplicates occur.
+#[hegel::composite]
+pub fn collection_docs(tc: &TestCase, collection: &'static str) -> Value {
+    let id = tc.draw(gs::sampled_from(&["a", "b", "c", "d"][..]));
+    let first = tc.draw(days());
+    if collection == "sleep" {
+        json!({"id": id, "day": first.to_string()})
     } else {
-        (arb_day(), id).prop_map(|(d, id)| json!({"id": id, "day": d.to_string()})).boxed()
+        let len = tc.draw(gs::optional(gs::integers::<i64>().min_value(0).max_value(400)));
+        json!({"id": id, "start_day": first.to_string(), "end_day": len.map(|l| (first + Duration::days(l)).to_string())})
     }
 }
 
-/// A heart-rate sample at an instant near a US DST switch or in the
-/// ten-day window, written in an arbitrary UTC offset.
-pub fn arb_hr_sample() -> impl Strategy<Value = Value> {
-    let base = prop::sample::select(vec![
-        date(2026, 3, 7), date(2026, 10, 31), date(2026, 10, 12), date(2026, 10, 16),
-    ]);
-    (
-        base,
-        0i64..(3 * 24 * 3600),
-        prop_oneof![3 => Just(0i64), 1 => 0i64..1000],
-        arb_offset(),
-        prop::option::weighted(0.9, 35u32..190),
-        prop::sample::select(vec!["awake", "rest", "sleep", "session", "workout", "live"]),
-    )
-        .prop_map(|(day, secs, millis, offset, bpm, source)| {
-            let instant = chrono::Utc.from_utc_datetime(&day.and_hms_opt(0, 0, 0).unwrap()) + Duration::seconds(secs) + Duration::milliseconds(millis);
-            json!({
-                "bpm": bpm,
-                "source": source,
-                "timestamp": instant.with_timezone(&offset).to_rfc3339(),
-            })
-        })
+/// A heart-rate sample at any instant (often around a US DST switch),
+/// written in any UTC offset, sometimes with a null bpm.
+#[hegel::composite]
+pub fn hr_samples(tc: &TestCase) -> Value {
+    let base = tc.draw(hegel::one_of!(
+        gs::sampled_from(&[date(2026, 3, 7), date(2026, 10, 31), date(2026, 10, 12)][..]),
+        any_day(),
+    ));
+    let secs = tc.draw(gs::integers::<i64>().min_value(0).max_value(3 * 24 * 3600));
+    let millis = tc.draw(hegel::one_of!(gs::just(0i64), gs::integers::<i64>().min_value(0).max_value(999)));
+    let offset = tc.draw(offsets());
+    let bpm = tc.draw(gs::optional(gs::integers::<u32>().min_value(25).max_value(230)));
+    let source = tc.draw(gs::sampled_from(&["awake", "rest", "sleep", "session", "workout", "live"][..]));
+    let instant = chrono::Utc.from_utc_datetime(&base.and_hms_opt(0, 0, 0).unwrap()) + Duration::seconds(secs) + Duration::milliseconds(millis);
+    json!({"bpm": bpm, "source": source, "timestamp": instant.with_timezone(&offset).to_rfc3339()})
 }
 
-/// A night from Eight Sleep's trends endpoint, in the shape of real
+/// A value in a provider field: a number, null, the "None" string Eight
+/// Sleep sends, or any other JSON.
+#[hegel::composite]
+pub fn field_values(tc: &TestCase) -> Value {
+    tc.draw(hegel::one_of!(
+        finite().map(Value::from),
+        gs::just(Value::Null),
+        gs::just(json!("None")),
+        hegel::extras::serde_json::values(),
+    ))
+}
+
+/// A night from Eight Sleep's trends endpoint in the shape of real
 /// responses: day-level fields, sometimes a main session with a stageSummary
-/// and sample series, scores with `current` and `average`. Fields come from
-/// small domains and are sometimes null or the string "None", as the
-/// unofficial API sends.
-pub fn arb_eight_day() -> impl Strategy<Value = Value> {
-    let secs = || {
-        prop_oneof![
-            4 => prop::sample::select(vec![0i64, 1020, 3600, 7200, 21600, 25200, 28800]).prop_map(Value::from),
-            1 => Just(Value::Null),
-            1 => Just(json!("None")),
-        ]
-    };
-    let small = || prop::option::of(prop::sample::select(vec![14.0, 15.5, 52.0, 58.0, 85.0])).prop_map(|v| v.map(Value::from).unwrap_or(Value::Null));
-    let session = (secs(), secs(), secs(), secs(), small()).prop_map(|(sleep, awake, out, total, hr)| {
-        json!({"id": "main", "stageSummary": {"sleepDuration": sleep, "awakeDuration": awake, "outDuration": out, "totalDuration": total},
-               "timeseries": {"heartRate": [["2026-10-18T04:00:00.000Z", hr]], "tempBedC": [["2026-10-18T04:00:00.000Z", 30.5]]}})
+/// and sample series, and scores with `current` and `average`.
+#[hegel::composite]
+pub fn eight_days(tc: &TestCase) -> Value {
+    let day = tc.draw(days());
+    let mut d = json!({
+        "day": day.to_string(),
+        "presenceDuration": tc.draw(field_values()),
+        "sleepDuration": tc.draw(field_values()),
+        "deepDuration": tc.draw(field_values()),
+        "remDuration": tc.draw(field_values()),
+        "lightDuration": tc.draw(field_values()),
+        "score": tc.draw(field_values()),
+        "processing": tc.draw(gs::optional(gs::booleans())),
+        "sleepQualityScore": {
+            "hrv": {"current": tc.draw(field_values()), "average": tc.draw(field_values())},
+            "heartRate": {"current": tc.draw(field_values()), "average": tc.draw(field_values())},
+        },
     });
-    (arb_day(), secs(), secs(), secs(), secs(), secs(), small(), small(), small(), prop::option::of(any::<bool>()), prop::option::weighted(0.5, session))
-        .prop_map(|(day, presence, sleep, deep, rem, light, hrv, hr, score, processing, session)| {
-            let mut d = json!({
-                "day": day.to_string(),
-                "presenceDuration": presence,
-                "sleepDuration": sleep,
-                "deepDuration": deep,
-                "remDuration": rem,
-                "lightDuration": light,
-                "score": score,
-                "processing": processing,
-                "sleepQualityScore": {"hrv": {"current": hrv, "average": 61}, "heartRate": {"current": hr, "average": 55}},
-            });
-            if let Some(s) = session {
-                d["mainSessionId"] = json!("main");
-                d["sessions"] = json!([s]);
-            }
-            d
-        })
+    if tc.draw(gs::booleans()) {
+        d["mainSessionId"] = json!("main");
+        d["sessions"] = json!([{
+            "id": "main",
+            "stageSummary": {
+                "sleepDuration": tc.draw(field_values()), "awakeDuration": tc.draw(field_values()),
+                "outDuration": tc.draw(field_values()), "totalDuration": tc.draw(field_values()),
+            },
+            "timeseries": {
+                "heartRate": [["2026-10-18T04:00:00.000Z", tc.draw(field_values())]],
+                "tempBedC": [["2026-10-18T04:00:00.000Z", tc.draw(field_values())]],
+            },
+        }]);
+    }
+    d
 }

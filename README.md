@@ -268,34 +268,43 @@ it, or `SOMNO_LOG=<path>` to write elsewhere.
 ## Testing
 
 `cargo test` runs example tests (fixtures shaped like real responses) and
-property-based tests (`tests/properties.rs`, proptest). The properties follow
-Hughes, "How to Specify It!" (2019). His comparison found model-based and
-metamorphic properties catch bugs fastest, while validity-only properties
-missed most planted bugs.
+property-based tests written with [Hegel](https://hegel.dev)
+(`tests/properties.rs`, generators in `tests/common`). Each property is named
+as a sentence about how somno behaves, e.g.
+`ties_go_to_the_earlier_bedtime` or `secrets_never_reach_the_log`. Hegel
+runs thousands of cases per property (`hegel.toml`) and shrinks any failure
+to a minimal example.
+
+The properties follow Hughes, "How to Specify It!" (2019). His comparison
+found model-based and metamorphic properties catch bugs fastest, while
+validity-only properties missed most planted bugs.
 
 - **Model-based.** Generators build the truth first and derive the provider
-  JSON from it, for example a night as runs of sleep stages, or a set of
-  periods across days. The code's answer is then compared with the model:
-  stage totals, stretches, onset and wake times, segments, chart columns,
-  the nightly pick, pagination and heart-rate buckets.
-- **Metamorphic.** Change the input in a known way and compare the outputs.
-  Shuffled API order gives the same nights. A range equals its two halves.
-  The result doesn't depend on whether Oura's date bounds are inclusive.
-  The same instants written in another UTC offset give the same results.
-- **Security postconditions.** Sensitive query values never reach the log
-  in any encoding. An OAuth redirect is accepted only with its exact state,
-  and any code survives the round trip.
-- **Generators are tested too.** Generated data is internally consistent,
-  and a measured distribution check makes sure the interesting cases happen:
-  tied sleep periods, naps, deleted periods, mid-night timezone changes, runs
-  at the 5-minute threshold, and empty nights. Values come from small domains
-  so ties and collisions are common.
+  JSON from it, for example a night as runs of sleep stages, or periods
+  across days. somno's answer is compared with the model: stage totals,
+  stretches, onset and wake times, segments, chart columns and hour marks,
+  the nightly pick, range lookups, pagination, heart-rate buckets, and Eight
+  Sleep nights.
+- **Metamorphic.** Change the input in a known way and compare the outputs:
+  - Shuffled API order gives the same nights.
+  - A range equals its two halves.
+  - Oura's inclusive or exclusive date bounds don't matter.
+  - The same instants written in another UTC offset give the same results.
+  - 5-minute and 30-second stages agree.
+- **Both directions.** Parsers are tested on what they must accept and on
+  what they must reject: malformed day offsets, foreign redirect URLs,
+  different OAuth states, user ids that could change a URL, hosts outside
+  the allowlist.
+- **Wide domains.** Any UTC offset, any latency or metric value, any JSON in
+  any field. Interesting subsets, like tied periods, runs around the
+  5-minute mark and nights that change timezone, are constructed directly.
+- **A scale probe** checks that a year of nights, a week of 30-second stages
+  and a month of heart rate stay fast.
 
-Failing inputs are saved in `proptest-regressions/` (committed) and replayed
-first. For a deeper run: `PROPTEST_CASES=5000 cargo test --test properties`.
-To check that the tests catch bugs, run mutation testing with
-`cargo mutants` (cargo-mutants), which plants small bugs and reports any that
-no test catches.
+Deeper run: `HEGEL_TEST_CASES=20000 cargo test --test properties`. See what
+was generated: `HEGEL_STATISTICS=1 cargo test --test properties -- --nocapture`.
+Mutation testing with `cargo mutants` (cargo-mutants) plants small bugs and
+reports any that no test catches.
 
 Bugs found this way, all fixed and kept as tests:
 - When two sleep periods tied for longest, the "main" night depended on the
@@ -314,24 +323,20 @@ Bugs found this way, all fixed and kept as tests:
 - `-0` didn't round-trip; `--1` parsed as one day ahead, and a huge offset
   panicked.
 - An absurd latency, or an absurd token expiry, overflowed and panicked.
+- Summarizing a year of nights was quadratic (4 s); documents are now
+  indexed by day once (found by the scale probe).
 
 Mutation testing (cargo-mutants 27.1, 252 mutants in the core functions)
-measured the suite. The first suite caught 204 of the 230 mutants that
-compiled. The misses pointed at the chart axis, Eight Sleep values, OAuth
-state comparison, empty codes and tokens, and day parsing, and each now has a
-property.
+measured the earlier proptest suite. It went from catching 204 of 230 mutants
+to every mutant except two that are unreachable (positive day offsets the
+parser never produces). The Hegel port keeps every property from that suite,
+split one contract per test.
 
 ## Verification status
 
-`cargo test` runs 86 tests (42 of them property tests): example tests over synthetic fixtures (summaries,
-OAuth callback/state, pasted redirect URLs, configure verdicts, scopes,
-token rotation, pagination, DST windows, host allowlist, log redaction,
-rendering, and the Oura views: day selection and spans, ordering, units,
-detail and table layout, bedtime windows, tags, workouts and sessions,
-heart-rate bucketing, the day dashboard, stage decoding, totals, onset,
-awakenings, movement, the hypnogram and stage JSON), property tests (parsers and summaries
-are total over arbitrary input and never invent values) and private-file
-storage and logging. `configure` has run live against Oura:
+`cargo test` runs 127 tests: 82 Hegel properties (see Testing), plus example
+tests over synthetic fixtures for each view, the stage decoder, OAuth
+parsing, `configure`'s verdicts, and private-file storage and logging. `configure` has run live against Oura:
 - With the real secret, the ID + secret check passed (`invalid_grant`).
 - With a wrong secret, it failed with `invalid_client`.
 
