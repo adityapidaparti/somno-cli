@@ -1832,3 +1832,26 @@ fn a_series_with_samples_never_shows_as_empty(tc: TestCase) {
     let out = views::render_detail(&[], &doc, ny());
     assert!(out.contains(&format!("{} samples", items.len())) && !out.contains("NaN") && !out.contains("inf"), "{out}");
 }
+
+/// Every Eight Sleep error reads as a sentence that names the HTTP status, and
+/// says what to do where somno knows: log in again, wait, or try later.
+#[hegel::test]
+fn eight_sleep_errors_say_what_happened_and_what_to_do(tc: TestCase) {
+    let status = tc.draw(hegel::one_of!(gs::sampled_from(&[401u16, 403, 404, 429, 500, 503][..]), gs::integers::<u16>().min_value(100).max_value(599)));
+    let detail = tc.draw(gs::optional(gs::from_regex(r"[a-z ]{1,40}")));
+    let e = http::ApiError::Status { service: "Eight Sleep", status, detail: detail.clone() };
+    let text = eight::explain(&e);
+    assert!(text.starts_with("Eight Sleep") && text.contains(&format!("HTTP {status}")), "{text}");
+    if let Some(d) = &detail {
+        assert!(text.ends_with(&format!("Eight Sleep said: {d}")), "{text}");
+    }
+    let advice = match status {
+        401 => Some("somno eight login"),
+        429 => Some("Wait a few minutes"),
+        500..=599 => Some("Try again later"),
+        _ => None,
+    };
+    if let Some(a) = advice {
+        assert!(text.contains(a), "{text}");
+    }
+}

@@ -600,12 +600,23 @@ fn prompt(label: &str) -> Result<String> {
     Ok(line.trim().to_string())
 }
 
+/// An environment variable's value when it is set and not blank, else `ask()`.
+fn from_env_or(var: &str, ask: impl FnOnce() -> Result<String>) -> Result<String> {
+    match std::env::var(var) {
+        Ok(v) if !v.trim().is_empty() => Ok(v.trim().to_string()),
+        _ => ask(),
+    }
+}
+
 fn oura_cmd(cmd: OuraCmd, tz: Tz, today: NaiveDate) -> Result<()> {
     match cmd {
         OuraCmd::Configure => {
             eprintln!("Your Oura app's Redirect URI must be exactly: {}", oura::REDIRECT_URI);
-            let client_id = prompt("Oura client ID: ")?;
-            let client_secret = rpassword::prompt_password("Oura client secret: ")?.trim().to_string();
+            // The environment variables let a setup without a terminal prompt
+            // (a script, a remote host) configure somno too.
+            let client_id = from_env_or("SOMNO_OURA_CLIENT_ID", || prompt("Oura client ID: "))?;
+            let client_secret =
+                from_env_or("SOMNO_OURA_CLIENT_SECRET", || Ok(rpassword::prompt_password("Oura client secret: ")?.trim().to_string()))?;
             if client_id.is_empty() || client_secret.is_empty() {
                 bail!("client ID and secret are both required");
             }

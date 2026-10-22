@@ -20,7 +20,7 @@ sleep score       84                88
 
 ## Install
 
-You need [Rust](https://rustup.rs).
+You need [Rust](https://rustup.rs) 1.89 or newer.
 
 ```sh
 cargo install --locked --git https://github.com/adityapidaparti/somno-cli
@@ -38,13 +38,25 @@ Give your agent this repository's link and ask it to install somno. It should:
 
 ## Set up
 
-**Oura.** Create an app at <https://developer.ouraring.com> with the redirect
-URI `http://localhost:8765/callback` and every scope ticked. Then:
+**Oura.** Oura's API needs a developer app of your own, and Gen3 and newer
+rings need an active Oura membership.
+
+1. Sign in at <https://developer.ouraring.com> with your Oura account and
+   create a new application.
+2. Give it a name and description, and fill in the website, privacy policy and
+   terms URLs the form asks for.
+3. Set the redirect URI to exactly `http://localhost:8765/callback`, with
+   nothing after it.
+4. Tick every scope.
+5. Save, and copy the client ID and client secret.
 
 ```sh
-somno oura configure    # enter the app's client ID and secret
+somno oura configure    # paste the client ID and secret; somno checks them with Oura
 somno oura login        # approve access in the browser
 ```
+
+Without a terminal prompt, set `SOMNO_OURA_CLIENT_ID` and
+`SOMNO_OURA_CLIENT_SECRET` before running `somno oura configure`.
 
 **Eight Sleep.**
 

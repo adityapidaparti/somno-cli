@@ -97,9 +97,9 @@ fn request_token(http: &Client, email: &str, password: &str) -> Result<Session> 
         "password": password,
     });
     let v = http::post_json(http, SERVICE, &Url::parse(AUTH_URL).expect("static URL"), &body).map_err(|e| match e.status() {
-        Some(400 | 401 | 403) => anyhow!("{e}: check the email and password"),
-        Some(429) => anyhow!("{e}: logins are rate limited; wait before retrying"),
-        _ => e.into(),
+        Some(s @ (400 | 401 | 403)) => anyhow!("Eight Sleep didn't accept that email and password (HTTP {s})."),
+        Some(429) => anyhow!("Eight Sleep is limiting how often you can log in (HTTP 429). Wait a few minutes, then try again."),
+        _ => anyhow!(explain(&e)),
     })?;
     session_from_response(&v, email, Utc::now().timestamp())
 }
@@ -120,13 +120,31 @@ fn relogin(http: &Client, email: &str) -> Result<Session> {
 }
 
 fn with_hint(e: ApiError) -> anyhow::Error {
-    let hint = match e.status() {
-        Some(401) => ": run `somno eight login EMAIL`",
-        Some(403) => ": this data may need an active Eight Sleep membership",
-        Some(429) => ": rate limited, retry later",
-        _ => "",
-    };
-    anyhow!("{e}{hint}")
+    anyhow!(explain(&e))
+}
+
+/// An Eight Sleep error as a plain sentence that says what happened and what
+/// to do, with the HTTP status and Eight Sleep's own message when there is one.
+pub fn explain(e: &ApiError) -> String {
+    let said = |detail: &Option<String>| detail.as_deref().map(|d| format!(" Eight Sleep said: {d}")).unwrap_or_default();
+    match e {
+        ApiError::Status { status, detail, .. } => {
+            let what = match status {
+                401 => "Eight Sleep rejected the saved login (HTTP 401). Run `somno eight login <your email>`.".to_string(),
+                403 => "Eight Sleep refused the request (HTTP 403). This data may need an active Eight Sleep membership.".to_string(),
+                404 => "Eight Sleep doesn't recognize this request (HTTP 404). Its unofficial API may have changed, so check for a newer somno.".to_string(),
+                429 => "Eight Sleep is limiting how many requests it accepts (HTTP 429). Wait a few minutes, then try again.".to_string(),
+                500..=599 => format!("Eight Sleep's servers had a problem (HTTP {status}). Try again later."),
+                s => format!("Eight Sleep answered with HTTP {s}."),
+            };
+            format!("{what}{}", said(detail))
+        }
+        ApiError::InvalidJson { .. } => {
+            "Eight Sleep sent a response somno can't read. Its unofficial API may have changed, so check for a newer somno.".to_string()
+        }
+        ApiError::Network { reason, .. } => format!("Couldn't reach Eight Sleep: {reason}. Check the internet connection and try again."),
+        other => other.to_string(),
+    }
 }
 
 pub struct Eight {

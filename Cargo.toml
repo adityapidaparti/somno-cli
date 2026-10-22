@@ -2,6 +2,7 @@
 name = "somno"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.89"
 description = "Read-only local CLI for Oura and Eight Sleep sleep data (no background process)"
 
 [dependencies]
