@@ -57,6 +57,8 @@ impl Stage {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Hypnogram {
     pub start: DateTime<FixedOffset>,
+    /// Oura's `bedtime_end`, when it parses.
+    pub end: Option<DateTime<FixedOffset>>,
     pub epoch_secs: i64,
     pub epochs: Vec<Option<Stage>>,
 }
@@ -68,7 +70,8 @@ impl Hypnogram {
         let (codes, epoch_secs) = [("sleep_phase_30_sec", 30), ("sleep_phase_5_min", 300), ("app_sleep_phase_5_min", 300)]
             .iter()
             .find_map(|(k, secs)| text(doc, &[k]).map(|s| (s, *secs)))?;
-        Some(Hypnogram { start, epoch_secs, epochs: codes.chars().map(Stage::from_code).collect() })
+        let end = text(doc, &["bedtime_end"]).and_then(parse_timestamp);
+        Some(Hypnogram { start, end, epoch_secs, epochs: codes.chars().map(Stage::from_code).collect() })
     }
 
     pub fn at(&self, epoch: usize) -> DateTime<FixedOffset> {
@@ -153,10 +156,13 @@ pub fn events(h: &Hypnogram, latency_secs: Option<f64>) -> Events {
     let epoch = h.epoch_secs.max(1);
     // Seconds from the start of the period to the end of the last sleep epoch.
     let last_sleep_end = window.map(|(_, b)| (b as i64 + 1) * epoch);
-    // A latency outside the period (negative, non-finite, longer than the
-    // period itself) or after the last sleep is not a usable onset; fall back
-    // to the first sleep epoch.
-    let span = h.epochs.len() as f64 * epoch as f64;
+    // A latency outside the period (negative, non-finite, past the end of the
+    // codes or of Oura's bedtime_end) or after the last sleep is not a usable
+    // onset; fall back to the first sleep epoch.
+    let mut span = h.epochs.len() as f64 * epoch as f64;
+    if let Some(secs) = h.end.map(|e| (e - h.start).num_seconds()).filter(|s| *s >= 0) {
+        span = span.min(secs as f64);
+    }
     let latency_secs = latency_secs
         .filter(|l| l.is_finite() && *l >= 0.0 && *l <= span)
         .map(|l| l as i64)
@@ -294,7 +300,8 @@ pub fn render_period(doc: &Value, width: usize, segments: bool) -> String {
     out += &render_chart(&h, width);
 
     let stats = stage_stats(&h);
-    let in_bed: i64 = stats.iter().map(|(_, s)| s.seconds).sum();
+    // Time in bed includes epochs with codes Oura didn't define.
+    let in_bed = h.epochs.len() as i64 * h.epoch_secs;
     let asleep: i64 = stats.iter().filter(|(s, _)| s.asleep()).map(|(_, s)| s.seconds).sum();
     out += &format!("\n  {:<8}{:<9}{:<10}{:<12}{:<9}{}\n", "stage", "time", "of bed", "of sleep", "longest", "stretches ≥5m");
     for (stage, s) in &stats {

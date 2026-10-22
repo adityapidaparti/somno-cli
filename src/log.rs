@@ -23,6 +23,43 @@ const REDACTED_PARAMS: &[&str] = &[
     "code_challenge",
 ];
 
+/// Whether a parameter or field name holds a secret, in any letter case.
+pub fn is_secret_name(name: &str) -> bool {
+    REDACTED_PARAMS.iter().chain(&["code_verifier"]).any(|p| p.eq_ignore_ascii_case(name))
+}
+
+/// `text` with each of `secrets` replaced by `redacted`, and the value of any
+/// `name=value` pair whose name is a secret name. For server messages that
+/// may echo what was sent.
+pub fn scrub(text: &str, secrets: &[&str]) -> String {
+    let mut out = text.to_string();
+    let mut secrets: Vec<&str> = secrets.iter().copied().filter(|s| s.chars().count() >= 4).collect();
+    secrets.sort_by_key(|s| std::cmp::Reverse(s.len()));
+    for s in secrets {
+        out = out.replace(s, "redacted");
+    }
+    let mut result = String::with_capacity(out.len());
+    let mut rest = out.as_str();
+    while let Some(i) = rest.find('=') {
+        let name_start = rest[..i].rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).map_or(0, |p| p + 1);
+        let name = &rest[name_start..i];
+        result.push_str(&rest[..=i]);
+        rest = &rest[i + 1..];
+        if is_secret_name(name) {
+            let lead = rest.len() - rest.trim_start_matches([' ', '"', '\'']).len();
+            result.push_str(&rest[..lead]);
+            rest = &rest[lead..];
+            let end = rest.find(|c: char| c.is_whitespace() || matches!(c, '&' | '"' | '\'' | ',' | ';' | '}' | ')')).unwrap_or(rest.len());
+            if end > 0 {
+                result.push_str("redacted");
+            }
+            rest = &rest[end..];
+        }
+    }
+    result.push_str(rest);
+    result
+}
+
 pub fn path() -> Option<PathBuf> {
     match std::env::var_os("SOMNO_LOG") {
         Some(v) if v.eq_ignore_ascii_case("off") => None,

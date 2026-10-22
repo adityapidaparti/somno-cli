@@ -209,11 +209,18 @@ impl Eight {
     }
 }
 
-/// The day's main sleep session: `mainSessionId`, else the first session.
+/// The day's main sleep session. With a `mainSessionId`, only that session;
+/// if it isn't in the list, none, and the day's totals are used rather than a
+/// nap's. Without one, the session with the most sleep.
 fn main_session(d: &Value) -> Option<&Value> {
     let sessions = d.get("sessions")?.as_array()?;
-    let id = text(d, &["mainSessionId"]);
-    sessions.iter().find(|s| id.is_some() && text(s, &["id"]) == id).or_else(|| sessions.first())
+    match text(d, &["mainSessionId"]) {
+        Some(id) => sessions.iter().find(|s| text(s, &["id"]) == Some(id)),
+        None => sessions.iter().rev().max_by(|a, b| {
+            let sleep = |s: &Value| num(s, &["stageSummary", "sleepDuration"]).unwrap_or(-1.0);
+            sleep(a).total_cmp(&sleep(b))
+        }),
+    }
 }
 
 /// Numeric values of a session time series (`[[timestamp, value], ...]`).

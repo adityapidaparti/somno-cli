@@ -1706,3 +1706,129 @@ fn large_inputs_stay_fast() {
         let _ = eight::summarize(&json!({"days": eight_days}), &days);
     });
 }
+
+// ---------------------------------------------------------------------------
+// Fixes from the Codex test audit (2026-10-21)
+// ---------------------------------------------------------------------------
+
+/// A server message that echoes one of the secrets the request sent, anywhere
+/// in its text, never shows it in the error or the log line.
+#[hegel::test]
+fn secrets_a_request_sent_never_come_back_in_an_error(tc: TestCase) {
+    // Secrets in a shape that can't appear inside the word "redacted".
+    let sent: Vec<String> = tc.draw(gs::vecs(gs::from_regex(r"[A-Z0-9]{8,40}")).min_size(1).max_size(3));
+    let echoed = sent[tc.draw(gs::integers::<usize>().max_value(sent.len() - 1))].clone();
+    let (before, after) = (tc.draw(gs::from_regex(r"[a-z ]{0,60}")), tc.draw(gs::from_regex(r"[a-z ]{0,60}")));
+    let key = tc.draw(gs::sampled_from(&["error_description", "message", "detail", "error"][..]));
+    let body = json!({key: format!("{before}{echoed}{after}")}).to_string();
+    let refs: Vec<&str> = sent.iter().map(String::as_str).collect();
+    let shown = http::error_message(body.as_bytes(), &refs).unwrap_or_default();
+    let logged = http::error_summary(body.as_bytes(), &refs);
+    for s in &sent {
+        assert!(!shown.contains(s.as_str()) && !logged.contains(s.as_str()), "{s} leaked: {shown:?} / {logged:?}");
+    }
+}
+
+/// A `name=value` pair for a secret name in a server message is redacted
+/// even when somno didn't send that value.
+#[hegel::test]
+fn secret_name_value_pairs_in_server_messages_are_redacted(tc: TestCase) {
+    let name = tc.draw(gs::sampled_from(&SENSITIVE[..]));
+    let upper = tc.draw(gs::booleans());
+    let name = if upper { name.to_uppercase() } else { name.to_string() };
+    let value = tc.draw(gs::from_regex(r"[A-Z0-9]{8,40}"));
+    let lead = tc.draw(gs::sampled_from(&["invalid ", "bad request: ", ""][..]));
+    let body = json!({"error_description": format!("{lead}{name}={value}")}).to_string();
+    let shown = http::error_message(body.as_bytes(), &[]).unwrap();
+    assert!(!shown.contains(&value) && shown.contains(&format!("{name}=redacted")), "{shown:?}");
+}
+
+/// A night whose `mainSessionId` names a session that isn't in the list
+/// uses the day's own totals, never another session such as a nap.
+#[hegel::test]
+fn a_missing_main_session_never_borrows_another_sessions_numbers(tc: TestCase) {
+    let day_sleep = tc.draw(gs::integers::<u32>().min_value(3600).max_value(40000));
+    let naps: Vec<u32> = tc.draw(gs::vecs(gs::integers::<u32>().min_value(60).max_value(3000)).min_size(1).max_size(3));
+    let sessions: Vec<Value> = naps.iter().enumerate().map(|(i, s)| json!({"id": format!("nap{i}"), "stageSummary": {"sleepDuration": s}})).collect();
+    let day = json!({"day": "2026-10-18", "mainSessionId": "main", "sleepDuration": day_sleep, "sessions": sessions});
+    assert_eq!(eight_night(day).asleep_s, Some(f64::from(day_sleep)));
+}
+
+/// Without a `mainSessionId`, the night is the session with the most sleep,
+/// wherever it sits in the list.
+#[hegel::test]
+fn without_a_main_session_id_the_longest_session_is_the_night(tc: TestCase) {
+    let sleeps: Vec<u32> = tc.draw(gs::vecs(gs::integers::<u32>().min_value(60).max_value(40000)).min_size(1).max_size(5));
+    let sessions: Vec<Value> = sleeps.iter().enumerate().map(|(i, s)| json!({"id": format!("s{i}"), "stageSummary": {"sleepDuration": s}})).collect();
+    let n = eight_night(json!({"day": "2026-10-18", "sessions": sessions}));
+    assert_eq!(n.asleep_s, sleeps.iter().max().map(|m| f64::from(*m)));
+}
+
+/// `hr` for a range keeps exactly the samples whose local day is in it, so
+/// a sample at the next day's midnight never lands under the last day.
+#[hegel::test]
+fn heart_rate_for_a_range_keeps_only_its_local_days(tc: TestCase) {
+    let samples: Vec<Value> = tc.draw(gs::vecs(hr_samples()).max_size(60));
+    let tz = zone(tc.draw(gs::sampled_from(&ZONES[..])));
+    let start = tc.draw(any_day());
+    let end = start + Duration::days(tc.draw(gs::integers::<i64>().min_value(0).max_value(3)));
+    let kept = views::samples_within(samples.clone(), tz, start, end);
+    let local_day = |s: &Value| ts(s["timestamp"].as_str().unwrap()).with_timezone(&tz).date_naive();
+    let expected: Vec<&Value> = samples.iter().filter(|s| (start..=end).contains(&local_day(s))).collect();
+    assert_eq!(kept.iter().collect::<Vec<_>>(), expected);
+}
+
+/// "Fell asleep" is never after the bedtime end Oura recorded, even when the
+/// stage codes run longer than the period.
+#[hegel::test]
+fn fell_asleep_is_never_after_the_recorded_bedtime_end(tc: TestCase) {
+    let p = tc.draw(period());
+    let span = p.epochs() as i64 * 30;
+    let cut = tc.draw(gs::integers::<i64>().min_value(0).max_value(span));
+    let latency = tc.draw(gs::integers::<i64>().min_value(0).max_value(span));
+    let end = p.start + Duration::seconds(cut);
+    let mut doc = p.doc();
+    doc["bedtime_end"] = json!(end.to_rfc3339());
+    let Some(h) = Hypnogram::from_doc(&doc) else { return };
+    if let Some(fell) = events(&h, Some(latency as f64)).fell_asleep {
+        if latency <= span && fell == p.start + Duration::seconds(latency) {
+            assert!(fell <= end, "fell asleep {fell} after bedtime end {end}");
+        }
+    }
+}
+
+/// Each stage's share of time in bed counts epochs with codes Oura didn't
+/// define as time in bed.
+#[hegel::test]
+fn shares_of_time_in_bed_count_undefined_codes(tc: TestCase) {
+    let codes = tc.draw(gs::from_regex(r"[1-4x]{1,120}"));
+    let doc = json!({"bedtime_start": "2026-10-18T00:00:00+00:00", "sleep_phase_30_sec": codes});
+    let out = somno::stages::render_period(&doc, 60, false);
+    let total = codes.len() as f64 * 30.0;
+    for (label, code) in [("deep", '1'), ("light", '2'), ("REM", '3'), ("awake", '4')] {
+        let table = out.split_once("of bed").map(|(_, t)| t).unwrap_or_else(|| panic!("no stage table in\n{out}"));
+        let line = table.lines().find(|l| l.starts_with(&format!("  {label:<8}"))).unwrap_or_else(|| panic!("no {label} row in\n{out}"));
+        let shown = line.get(19..29).unwrap_or("").trim();
+        let secs = codes.chars().filter(|c| *c == code).count() as f64 * 30.0;
+        assert_eq!(shown, format!("{:.0}%", 100.0 * secs / total), "{label} in {line:?}");
+    }
+}
+
+/// Heart-rate samples too large to average show `—`, never NaN.
+#[hegel::test]
+fn huge_heart_rate_samples_never_show_as_nan(tc: TestCase) {
+    let bpms: Vec<f64> = tc.draw(gs::vecs(hegel::one_of!(gs::just(f64::MAX), gs::just(1e308), finite())).min_size(1).max_size(6));
+    let samples: Vec<Value> = bpms.iter().map(|b| json!({"bpm": b, "source": "rest", "timestamp": "2026-10-18T04:00:00+00:00"})).collect();
+    let out = views::render_hr(&views::hr_buckets(&samples, ny(), false));
+    assert!(!out.contains("NaN") && !out.contains("inf"), "{out}");
+}
+
+/// A sample series with values counts them in the detail view, even when they
+/// are too large to average.
+#[hegel::test]
+fn a_series_with_samples_never_shows_as_empty(tc: TestCase) {
+    let items: Vec<f64> = tc.draw(gs::vecs(hegel::one_of!(gs::just(f64::MAX), gs::just(1e308), finite())).min_size(1).max_size(6));
+    let doc = json!({"day": "2026-10-18", "heart_rate": {"interval": 300, "items": items, "timestamp": "2026-10-18T00:00:00+00:00"}});
+    let out = views::render_detail(&[], &doc, ny());
+    assert!(out.contains(&format!("{} samples", items.len())) && !out.contains("NaN") && !out.contains("inf"), "{out}");
+}

@@ -509,7 +509,9 @@ fn format_string(s: &str, tz: Tz) -> String {
 fn sample_summary(key: &str, v: &Value) -> String {
     let items = sample_items(v);
     let interval = num(v, &["interval"]).map(|i| format!(" every {i:.0}s")).unwrap_or_default();
-    let Some(avg) = mean(&items) else { return format!("no samples{interval}") };
+    if items.is_empty() {
+        return format!("no samples{interval}");
+    }
     let min = items.iter().cloned().fold(f64::INFINITY, f64::min);
     let max = items.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
     let unit = if key.contains("heart_rate_variability") || key.contains("hrv") {
@@ -520,7 +522,8 @@ fn sample_summary(key: &str, v: &Value) -> String {
         ""
     };
     let decimals = if key == "met" { 1 } else { 0 };
-    format!("{} samples{interval} · avg {avg:.decimals$}{unit} · min {min:.decimals$} · max {max:.decimals$}", items.len())
+    let avg = mean(&items).map(|a| format!("{a:.decimals$}{unit}")).unwrap_or_else(|| DASH.into());
+    format!("{} samples{interval} · avg {avg} · min {min:.decimals$} · max {max:.decimals$}", items.len())
 }
 
 // ---- heart rate (time series) ----
@@ -551,6 +554,15 @@ impl HrStats {
     pub fn avg(&self) -> Option<f64> {
         (self.samples > 0).then(|| self.sum / self.samples as f64).filter(|a| a.is_finite()).map(|a| a.clamp(self.min, self.max))
     }
+}
+
+/// The samples whose time falls on a local day in `start..=end` in `tz`.
+/// Oura's heart-rate window can include the instant that starts the next day.
+pub fn samples_within(samples: Vec<Value>, tz: Tz, start: NaiveDate, end: NaiveDate) -> Vec<Value> {
+    samples
+        .into_iter()
+        .filter(|s| text(s, &["timestamp"]).and_then(parse_timestamp).is_some_and(|t| (start..=end).contains(&t.with_timezone(&tz).date_naive())))
+        .collect()
 }
 
 /// A local day, or one local clock hour identified by its start instant (so
@@ -593,14 +605,8 @@ pub fn render_hr(buckets: &BTreeMap<HrKey, HrStats>) -> String {
             None => day.to_string(),
         };
         let sources: Vec<String> = s.by_source.iter().map(|(k, n)| format!("{k} {n}")).collect();
-        out += &format!(
-            "{label:<16}{:<9}{:<6.0}{:<6.0}{:<6.0}{}\n",
-            s.samples,
-            s.min,
-            s.avg().unwrap_or(f64::NAN),
-            s.max,
-            sources.join(", ")
-        );
+        let avg = s.avg().map(|a| format!("{a:.0}")).unwrap_or_else(|| DASH.into());
+        out += &format!("{label:<16}{:<9}{:<6.0}{avg:<6}{:<6.0}{}\n", s.samples, s.min, s.max, sources.join(", "));
     }
     out
 }

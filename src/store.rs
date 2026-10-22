@@ -59,7 +59,11 @@ pub fn read<T: DeserializeOwned>(name: &str) -> Result<Option<T>> {
 pub fn write<T: Serialize>(name: &str, value: &T) -> Result<PathBuf> {
     let dir = private_dir()?;
     let path = dir.join(name);
-    let temp = dir.join(format!(".{name}.tmp"));
+    // A temporary file per write, so two processes or threads saving the same
+    // file can't truncate each other's half-written copy.
+    static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let temp = dir.join(format!(".{name}.{}.{n}.tmp", std::process::id()));
     let mut file = open_private(&temp, true).with_context(|| format!("writing {}", temp.display()))?;
     file.write_all(&serde_json::to_vec_pretty(value)?)?;
     file.sync_all()?;

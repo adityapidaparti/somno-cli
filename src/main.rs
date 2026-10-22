@@ -491,7 +491,7 @@ fn show_stages(day: NaiveDate, segments: bool, width: usize, json: bool) -> Resu
 fn show_hr(r: &RangeArgs, tz: Tz, today: NaiveDate) -> Result<()> {
     let (start, end, single) = resolve_range(r, today, 31)?;
     let params = oura::window_params("heartrate", Some(start), Some(end + Duration::days(1)), tz)?;
-    let samples = Oura::load(http::client()?)?.collection("heartrate", &params)?;
+    let samples = views::samples_within(Oura::load(http::client()?)?.collection("heartrate", &params)?, tz, start, end);
     if r.json {
         return json_out(tz, start, end, &BTreeMap::from([("heartrate".to_string(), samples)]), &BTreeMap::new());
     }

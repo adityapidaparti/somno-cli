@@ -62,37 +62,48 @@ pub fn check_destination(url: &Url) -> Result<(), ApiError> {
 
 pub fn get(client: &Client, service: &'static str, url: &Url, bearer: &str) -> Result<Value, ApiError> {
     check_destination(url)?;
-    send(service, "GET", url, client.get(url.clone()).bearer_auth(bearer))
+    send(service, "GET", url, client.get(url.clone()).bearer_auth(bearer), &[bearer])
 }
 
 pub fn post_form(client: &Client, service: &'static str, url: &Url, form: &[(&str, &str)]) -> Result<Value, ApiError> {
     check_destination(url)?;
-    send(service, "POST", url, client.post(url.clone()).form(form))
+    send(service, "POST", url, client.post(url.clone()).form(form), &form_secrets(form))
 }
 
 pub fn post_json(client: &Client, service: &'static str, url: &Url, body: &Value) -> Result<Value, ApiError> {
     check_destination(url)?;
-    send(service, "POST", url, client.post(url.clone()).json(body))
+    send(service, "POST", url, client.post(url.clone()).json(body), &json_secrets(body))
 }
 
 /// Status code of a GET, without following redirects or parsing the body.
 pub fn get_status(client: &Client, service: &'static str, url: &Url) -> Result<u16, ApiError> {
     check_destination(url)?;
-    Ok(exchange(service, "GET", url, client.get(url.clone()))?.0)
+    Ok(exchange(service, "GET", url, client.get(url.clone()), &[])?.0)
 }
 
 /// POST a form and return the status with any JSON body, error statuses
 /// included. For probes that interpret the error themselves.
 pub fn post_form_outcome(client: &Client, service: &'static str, url: &Url, form: &[(&str, &str)]) -> Result<(u16, Option<Value>), ApiError> {
     check_destination(url)?;
-    let (status, body) = exchange(service, "POST", url, client.post(url.clone()).form(form))?;
+    let (status, body) = exchange(service, "POST", url, client.post(url.clone()).form(form), &form_secrets(form))?;
     Ok((status, serde_json::from_slice::<Value>(&body).ok().filter(Value::is_object)))
 }
 
-fn send(service: &'static str, method: &str, url: &Url, request: RequestBuilder) -> Result<Value, ApiError> {
-    let (status, body) = exchange(service, method, url, request)?;
+/// Values of a form's secret fields (tokens, codes, client secret, password).
+fn form_secrets<'a>(form: &[(&str, &'a str)]) -> Vec<&'a str> {
+    form.iter().filter(|(k, _)| crate::log::is_secret_name(k)).map(|(_, v)| *v).collect()
+}
+
+fn json_secrets(body: &Value) -> Vec<&str> {
+    body.as_object()
+        .map(|o| o.iter().filter(|(k, _)| crate::log::is_secret_name(k)).filter_map(|(_, v)| v.as_str()).collect())
+        .unwrap_or_default()
+}
+
+fn send(service: &'static str, method: &str, url: &Url, request: RequestBuilder, secrets: &[&str]) -> Result<Value, ApiError> {
+    let (status, body) = exchange(service, method, url, request, secrets)?;
     if !(200..300).contains(&status) {
-        return Err(ApiError::Status { service, status, detail: short_message(&body) });
+        return Err(ApiError::Status { service, status, detail: error_message(&body, secrets) });
     }
     match serde_json::from_slice::<Value>(&body) {
         Ok(v) if v.is_object() => Ok(v),
@@ -101,7 +112,7 @@ fn send(service: &'static str, method: &str, url: &Url, request: RequestBuilder)
 }
 
 /// Every request goes through here: send, read the body, log one line.
-fn exchange(service: &'static str, method: &str, url: &Url, request: RequestBuilder) -> Result<(u16, Vec<u8>), ApiError> {
+fn exchange(service: &'static str, method: &str, url: &Url, request: RequestBuilder, secrets: &[&str]) -> Result<(u16, Vec<u8>), ApiError> {
     let started = std::time::Instant::now();
     let target = crate::log::redact_url(url);
     let network = |e: reqwest::Error| {
@@ -113,24 +124,36 @@ fn exchange(service: &'static str, method: &str, url: &Url, request: RequestBuil
     let status = response.status().as_u16();
     let body = response.bytes().map_err(network)?.to_vec();
     let ms = started.elapsed().as_millis();
-    let error = if (200..300).contains(&status) { String::new() } else { error_summary(&body) };
+    let error = if (200..300).contains(&status) { String::new() } else { error_summary(&body, secrets) };
     crate::log::event("http", format_args!("{method} {target} -> {status} ({ms} ms, {} bytes){error}", body.len()));
     Ok((status, body))
 }
 
-/// ` error=<code> message=<short text>` from a JSON error body, for the log.
-fn error_summary(body: &[u8]) -> String {
+/// ` error=<code> message=<short text>` from a JSON error body, for the log,
+/// with any secret the request sent removed.
+pub fn error_summary(body: &[u8], secrets: &[&str]) -> String {
     let code = serde_json::from_slice::<Value>(body)
         .ok()
-        .and_then(|v| v.get("error").and_then(Value::as_str).map(|c| c.chars().filter(|c| !c.is_control()).take(60).collect::<String>()));
+        .and_then(|v| v.get("error").and_then(Value::as_str).map(|c| crate::log::scrub(c, secrets).chars().filter(|c| !c.is_control()).take(60).collect::<String>()));
     let mut out = String::new();
     if let Some(code) = code {
         out += &format!(" error={code}");
     }
-    if let Some(message) = short_message(body) {
+    if let Some(message) = error_message(body, secrets) {
         out += &format!(" message={message:?}");
     }
     out
+}
+
+/// `short_message` with any secret the request sent, and any `key=value`
+/// secret, removed before it is shortened.
+pub fn error_message(body: &[u8], secrets: &[&str]) -> Option<String> {
+    let v: Value = serde_json::from_slice(body).ok()?;
+    ["error_description", "message", "detail", "error"].iter().find_map(|k| {
+        let text = crate::log::scrub(v.get(*k)?.as_str()?, secrets);
+        let clean: String = text.chars().filter(|c| !c.is_control()).take(160).collect();
+        (!clean.trim().is_empty()).then_some(clean)
+    })
 }
 
 /// A short human-readable error string from a JSON error body, if there is one.
